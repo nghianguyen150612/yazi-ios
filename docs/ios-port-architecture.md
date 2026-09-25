@@ -228,11 +228,16 @@ configuration/runtime directories.
 
 ### Trash
 
-Expose a capability-aware trash operation with the upstream browse, metadata,
-restore, remove, rename, and empty operations where the device can provide them.
-If a rootful/rootless device cannot offer a compatible trash, return an explicit
-unsupported/permission result and keep ordinary delete/copy/move available. Do not
-make trash support a prerequisite for starting Yazi-iOS.
+Upstream `trash` crate (v5.2.8) does not support iOS (`cannot find module or crate platform in this scope`).
+Task 003 removes the external `trash` crate dependency for `target_os = "ios"` and replaces it with a Yazi-owned
+iOS Trash backend in `yazi-fs` under `src/trash/ios/`.
+
+The iOS Trash backend architecture:
+- **Trash Root Location**: Resolves dynamically using `dirs::home_dir()` (e.g., `~/.local/share/Trash`), containing `files/` and `info/` subdirectories. This ensures consistent CLI/SSH behavior for both root and mobile users on jailbroken iOS devices.
+- **Metadata Format**: Follows Freedesktop `.trashinfo` specification (`[Trash Info]` section with percent-encoded `Path=` and ISO-formatted `DeletionDate=`). Path traversal sequences (`../`) in metadata are strictly validated and rejected.
+- **Collision Resolution**: When trashing an item whose basename already exists in the Trash `files/` directory, unique filenames (`foo 1.txt`, `foo 2.txt`) are generated while preserving original path metadata.
+- **Move & Copy Fallback**: Uses atomic `fs::rename()` to move items into Trash `files/`. If `fs::rename()` fails with cross-device link error (`EXDEV`), a recursive copy + verify + remove fallback preserves user data across different mounts/filesystems.
+- **Management Operations**: Implements `list`, `entry`, `metadata`, `revalidate`, `remove_file`, `remove_dir`, `restore`, `rename`, and `empty` in `yazi-fs/src/trash/ios/trash.rs`. Restoring an item returns it to its original path (creating parent directories if necessary) and refuses to overwrite existing files.
 
 ### File watcher
 
