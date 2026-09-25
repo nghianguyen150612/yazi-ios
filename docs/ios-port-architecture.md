@@ -129,7 +129,7 @@ those executables or by the build/package tooling.
 | Opener and external integrations | `yazi-config/src/open`, `opener`, preset rules, `yazi-cli/src/env/env.rs` | `xdg-open`, `open`, Windows, and Termux rules do not define an iOS opener; runtime integration must be explicit |
 | Mount/device discovery | `yazi-fs/src/mounts` | Linux and macOS monitor implementations exist; iOS needs a provider or a deliberate empty capability set |
 | Package manager | `yazi-cli/src/package` | Git, filesystem, archive, hashing, and deploy steps are optional runtime capabilities and not a reason to block launch |
-| Shared paths, shell syntax, and metadata | `yazi-shared`, `yazi-shim` | Unix path/string conversions and user/UID lookups are cross-platform code that must be audited at the iOS boundary |
+| Shared paths, shell syntax, and metadata | `yazi-shared`, `yazi-shim` | Unix path/string conversion still needs iOS auditing; Task 002 isolates current user/group identity behind a native iOS lookup adapter |
 
 ## Platform-sensitive findings from the baseline
 
@@ -185,9 +185,37 @@ The most important observations for later tasks are:
     and runtime behavior must be tested independently rather than hidden behind a
     feature reduction.
 
+## Task 002 identity adapter
+
+Yazi's only `uzers` path is the direct Unix dependency from `yazi-shim`; Yazi
+uses it for the current UID/GID and UID/GID-to-name lookups. Version 0.12.2 does
+not define its `UserExtras` or `GroupExtras` types for iOS, and its iOS
+`getgrouplist` path also passes unsigned GIDs to the signed Apple ABI.
+`uzers 0.12.2` is the newest published release, so a version update cannot
+remove this blocker.
+
+`yazi_shim::Uzers` now keeps the existing facade while selecting a narrow
+backend:
+
+- regular Unix continues to use the existing cached `uzers` implementation;
+- iOS uses `getuid`, `getgid`, `getpwuid_r`, and `getgrgid_r` directly from
+  `libc`;
+- caller-owned lookup buffers grow on `ERANGE`, unknown IDs and lookup errors
+  map to the facade's existing `None` result, and returned names are copied as
+  lossless OS bytes before the buffer is released.
+
+Yazi does not consume group-membership lists, so the iOS adapter does not
+implement `getgrouplist`. The real IDs remain available to XDG runtime/temp
+isolation, secure-directory ownership checks, filesystem metadata, and the
+`ya.uid()`, `ya.gid()`, `ya.user_name()`, and `ya.group_name()` Lua APIs. This
+is an identity adapter, not a claim that the full filesystem subsystem builds
+or has run on a physical device; target CI and real-device validation remain
+separate evidence.
+
 ## Anticipated iOS adapters
 
-These are boundaries for Tasks 002–020, not implementations in Task 001.
+These are boundaries for the remaining port tasks. The identity adapter above
+is the only implementation recorded by Task 002.
 
 ### Filesystem and platform paths
 
@@ -316,10 +344,11 @@ SSH session; simulator or host-terminal success is not a substitute.
 
 `.github/workflows/ios.yml` adds an isolated macOS job that prints the Apple and
 Rust environment, installs `aarch64-apple-ios`, and runs the locked build for both
-default binaries. It does not modify or bypass the existing Linux, macOS, Windows,
-formatting, or lint workflows. The build step is intentionally not marked
-`continue-on-error` and does not use `|| true`: a red result is the first genuine
-baseline signal.
+default binaries. It also permits an explicit `workflow_dispatch` on `iOS` while
+retaining the Task 001 push/pull-request checks for `main`. It does not modify or
+bypass the existing Linux, macOS, Windows, formatting, or lint workflows. The
+build step is intentionally not marked `continue-on-error` and does not use
+`|| true`: a red result is the first genuine baseline signal.
 
 Task 001 makes documentation and CI changes only. It does not add an iOS trash,
 watcher, clipboard, opener, process, FFI, or Lua implementation, and it does not

@@ -22,11 +22,29 @@ The status vocabulary is:
   iOS-specific compilation or semantic gap that must be confirmed by CI/device
   work.
 - **Build unvalidated** — no iOS build has been performed for that path yet.
+- **iOS compile path implemented** — an iOS-specific implementation exists, but
+  compilation or runtime claims still require the corresponding target evidence.
 
-The planned-task column intentionally uses `TBD` after Task 001. The detailed
-Tasks 002–020 sequence is not specified by this baseline; this table is the
-inventory against which that sequence should be planned. A row may be revisited
-without changing its upstream behavior.
+Rows touched by Task 002 use `002` in the planned-task column; unrelated rows
+remain `TBD`. A row may be revisited without changing its upstream behavior.
+
+## Task 002 evidence
+
+Task 001's real device-target workflow,
+[`aarch64-apple-ios` run 36090726252](https://github.com/nghianguyen150612/yazi-ios/actions/runs/36090726252),
+stopped in `uzers 0.12.2` with seven errors in `src/base.rs`: missing iOS
+`UserExtras` and `GroupExtras` definitions plus the `getgrouplist` UID/GID ABI
+mismatch. Yazi's direct path is `yazi-shim -> uzers`; no other Yazi crate uses
+the dependency directly.
+
+Task 002 isolates iOS from that dependency and uses the iOS-supported
+`getuid`/`getgid` and reentrant `getpwuid_r`/`getgrgid_r` declarations from
+`libc 0.2.189`. The existing facade, real IDs, lossless OS-byte names, ownership
+checks, runtime/temp UID suffixes, and Lua identity APIs remain in place. The
+shared host tests cover result mapping, unknown IDs, errors, buffer growth, and
+non-UTF-8 name copying; they do not prove the libc behavior of an iOS runtime.
+The target workflow result must be used for compile evidence, and a jailbroken
+physical device is still required for runtime validation.
 
 ## Feature inventory
 
@@ -43,10 +61,11 @@ without changing its upstream behavior.
 | Input, pickers, confirmation, which | Vim-like input, pick, confirm, which-key, completion, and modal components are built in | Portable (source-level), with TTY/SSH validation pending | Preserve UI and parser behavior; use the terminal capability adapter | Terminal input; optional helpers | Yes | TBD |
 | Task scheduling and progress | Async workers, priorities, progress, cancellation, retries, hooks, and task summaries are implemented | Expected platform adapter | Retain scheduler; make process/file capabilities explicit and non-fatal | Tokio; shell for some tasks | Yes | TBD |
 | Bulk copy, move, delete, link, and hardlink | File workers traverse trees, preserve metadata, and report progress | Expected platform adapter | Keep the operation model; adapt permissions, case folding, and unavailable device paths | Rust filesystem; platform permissions | Yes | TBD |
-| File metadata and attributes | `Cha` models kind, mode, ownership, timestamps, device IDs, and link counts | Expected platform adapter | Keep the metadata model and map iOS/jailbreak filesystem capabilities honestly | Rust std/libc metadata | Yes | TBD |
+| Unix user/group identity and Lua APIs | Current UID/GID and optional UID/GID name lookup support secure paths, ownership checks, and `ya.uid()`/`gid()`/`user_name()`/`group_name()` | iOS compile path implemented through native `getuid`/`getgid` and reentrant lookup; target and device validation required | Preserve the `Uzers` facade, regular-Unix cache, real iOS IDs, and lossless names | `uzers` off iOS; `libc` on iOS | Yes | 002 |
+| File metadata and attributes | `Cha` models kind, mode, ownership, timestamps, device IDs, and link counts | iOS compile path implemented for current identity lookup; metadata and device behavior still require validation | Keep real Unix UID/GID metadata and map iOS/jailbreak filesystem capabilities honestly | Rust std/libc metadata | Yes | TBD |
 | Case-insensitive filename handling | Linux, Android, macOS, Windows, NetBSD, and OpenBSD have specialized case-folding paths | Known blocker (source audit): no iOS `casefold_impl` branch is visible | Add an iOS path/final-path implementation or a deliberately tested fallback | Apple filesystem APIs or libc | Yes | TBD |
 | Path expansion and URL normalization | XDG, home, tilde, absolute/relative, view URLs, and path cleaning are centralized in `yazi-fs`/`yazi-shared` | Expected platform adapter | Preserve `Url`/`Path` contracts; provide iOS platform roots and permission-aware expansion | Rust std; jailbreak path layout | Yes | TBD |
-| XDG, config, state, runtime, and temp directories | Unix builds use XDG variables and home-directory fallbacks; other platforms have separate paths | Expected platform adapter | Define rootful/rootless iOS locations and a safe runtime/temp policy | Rust std; jailbreak environment | Yes | TBD |
+| XDG, config, state, runtime, and temp directories | Unix builds use XDG variables and home-directory fallbacks; other platforms have separate paths | iOS current-UID suffix has a native lookup path; the overall iOS path policy remains unvalidated | Define rootful/rootless iOS locations and a safe runtime/temp policy without replacing the real UID | Rust std; jailbreak environment | Yes | TBD |
 | Mount and device discovery | Linux monitors `/proc`; macOS uses disk arbitration; generic partition metadata is used for refresh/sound decisions | Expected platform adapter; iOS monitor is not implemented | Add a provider or explicit unavailable implementation while keeping the partition contract | iOS/device APIs or an agreed empty provider | Yes | TBD |
 | Trash browsing and restore | Platform trash implementations support list, metadata, remove, restore, rename, and empty operations | Known blocker (source audit): iOS is marked unsupported, while local delete cfg needs reconciliation | Implement the iOS trash contract or return explicit unsupported results without blocking launch | Platform trash policy; no mandatory helper | Yes | TBD |
 | Local file watcher | `notify::RecommendedWatcher` is primary, with `PollWatcher` fallback and mount refresh callbacks | Expected platform adapter | Validate FSEvents/dispatch availability; retain polling and report capability | `notify`; optional platform notifications | Yes | TBD |
@@ -98,7 +117,7 @@ without changing its upstream behavior.
 | Shared memory for graphics | Kitty image transport can use POSIX shared memory with a base64 fallback | Expected platform adapter; iOS availability unvalidated | Keep base64 fallback and gate shared memory by capability | POSIX shared memory; terminal | Yes | TBD |
 | Foreign-function interfaces | `yazi-ffi` wraps libc/rustix shared memory and macOS Core Foundation/IOKit/Objective-C facilities | Known blocker (source audit): iOS-specific framework availability is not established | Audit each FFI dependency against iOS SDK and entitlements | Apple SDK; jailbreak APIs | Yes | TBD |
 | Allocator and memory behavior | jemalloc is selected for non-macOS/non-Windows targets, which includes iOS in the baseline | Known blocker (source audit): target suitability and build behavior are unverified | Select a supported allocator or prove the existing one on iOS | Native allocator/build toolchain | Yes | TBD |
-| Rust target and Apple linking | The workspace has no iOS-specific target configuration or CI before Task 001 | Build unvalidated | Add the macOS `aarch64-apple-ios` baseline path without suppressing failures | Xcode/iOS SDK; Rust target | Yes | TBD |
+| Rust target and Apple linking | Task 001 added an unsuppressed macOS `aarch64-apple-ios` baseline workflow | Task 001 CI observed the `uzers` blocker; Task 002 adds the iOS identity source path and explicit branch dispatch | Confirm the old errors are gone and record the next independent target blocker without suppressing failures | Xcode/iOS SDK; Rust target | Yes | 002 |
 | Existing desktop CI | Upstream tests and checks run on Linux, macOS, and Windows | Portable (source-level); must remain unchanged | Add an isolated iOS workflow and retain all existing jobs | GitHub Actions runners | No | TBD |
 | Linux-specific filesystem/mount behavior | `/proc`, inotify-style watcher selection, device metadata, and Linux libc calls are selected behind Linux cfgs | Portable (source-level) for desktop; not an iOS path | Do not port Linux assumptions to iOS; use adapters or explicit unsupported results | Linux kernel interfaces | Yes | TBD |
 | macOS-specific trash/mount/FFI | macOS has bespoke trash, disk arbitration, Core Foundation, and Objective-C code | Uninvestigated for iOS | Reuse only APIs proven available on iOS; otherwise provide a separate adapter | Apple frameworks | Yes | TBD |

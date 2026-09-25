@@ -5602,6 +5602,7 @@ dependencies = [
  "arc-swap",
  "fdlimit",
  "hashbrown 0.17.1",
+ "libc",
  "mlua",
  "percent-encoding",
  "ratatui-core",
