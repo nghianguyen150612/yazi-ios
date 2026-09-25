@@ -1,0 +1,71 @@
+name: iOS Baseline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  ios:
+    name: aarch64-apple-ios (baseline)
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Report Apple SDK and Rust environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' '--- macOS ---'
+          sw_vers
+          printf '%s\n' '--- Xcode ---'
+          xcode-select -p
+          xcodebuild -version
+          xcodebuild -showsdks
+          printf '%s\n' '--- iOS SDK ---'
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+          printf '%s\n' '--- Rust before target setup ---'
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version
+          rustup target list --installed
+
+      - name: Install Rust iOS target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-ios
+          printf '%s\n' '--- Rust after target setup ---'
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version
+          rustup target list --installed
+
+      - name: Inspect locked workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+          cargo pkgid --package yazi-fm
+          cargo pkgid --package yazi-cli
+
+      - name: Attempt aarch64-apple-ios build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --verbose --target aarch64-apple-ios \
+            --package yazi-fm \
+            --package yazi-cli
