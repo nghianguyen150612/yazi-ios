@@ -35,8 +35,17 @@ pub(super) enum Command {
 	/// Manage the cache.
 	#[command(subcommand)]
 	Cache(CommandCache),
+	/// Open files with the application the system associates with them.
+	Open(CommandOpen),
 	/// Print environment and configuration information.
 	Env,
+}
+
+#[derive(clap::Args)]
+pub(super) struct CommandOpen {
+	/// Files to open.
+	#[arg(index = 1, num_args = 1.., required = true)]
+	pub(super) targets: Vec<OsString>,
 }
 
 #[derive(clap::Args)]

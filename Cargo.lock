@@ -5208,6 +5208,7 @@ dependencies = [
  "yazi-config",
  "yazi-dds",
  "yazi-emulator",
+ "yazi-ffi",
  "yazi-fs",
  "yazi-macro",
  "yazi-shared",

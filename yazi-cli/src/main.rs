@@ -1,4 +1,4 @@
-yazi_macro::mod_pub!(cache dds env package shared);
+yazi_macro::mod_pub!(cache dds env open package shared);
 
 yazi_macro::mod_flat!(args);
 
@@ -116,6 +116,8 @@ async fn run() -> anyhow::Result<()> {
 				}
 			}
 		}
+
+		Command::Open(cmd) => open::Open::run(&cmd.targets)?,
 
 		Command::Env => {
 			yazi_tty::init();
