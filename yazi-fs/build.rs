@@ -1,7 +1,7 @@
 fn main() {
 	cfg_aliases::cfg_aliases! {
 		trash_unsupported: {
-			any(target_os = "android", target_os = "ios")
+			target_os = "android"
 		},
 		trash_unix: {
 			all(unix, not(trash_unsupported))
