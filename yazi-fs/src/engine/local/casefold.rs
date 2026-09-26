@@ -10,7 +10,12 @@ pub(super) async fn casefold(path: impl AsRef<Path>) -> io::Result<PathBuf> {
 	tokio::task::spawn_blocking(move || casefold_impl(path)).await?
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "freebsd"))]
+#[cfg(any(
+	target_os = "macos",
+	target_os = "ios",
+	target_os = "windows",
+	target_os = "freebsd"
+))]
 fn casefold_impl(path: PathBuf) -> io::Result<PathBuf> {
 	let mut it = path.components();
 	let mut parts = vec![];
@@ -157,7 +162,7 @@ fn casefold_impl(path: PathBuf) -> io::Result<PathBuf> {
 	}
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
 fn final_path(path: &Path) -> io::Result<PathBuf> {
 	use std::{ffi::{CStr, CString, OsString}, os::{fd::{AsRawFd, FromRawFd, OwnedFd}, unix::ffi::{OsStrExt, OsStringExt}}};
 
