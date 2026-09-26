@@ -48,3 +48,10 @@ syntect         = { workspace = true }
 tokio           = { workspace = true }
 unicode-width   = { workspace = true }
 yazi-prebuilt   = "0.1.0"
+
+# Target-specific dependencies
+[target.'cfg(target_os = "ios")'.dependencies]
+syntect = { workspace = true, features = ["regex-fancy"] }
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+syntect = { workspace = true, features = ["regex-onig"] }
