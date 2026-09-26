@@ -125,7 +125,7 @@ those executables or by the build/package tooling.
 | VFS and remote files | `yazi-vfs`, `yazi-sftp`, `yazi-vfs/src/engine/{lua,sftp}` | SFTP, Lua providers, HTTP writes, cache/stamp paths, and Unix authentication agents need device and SSH testing |
 | DDS and cross-instance state | `yazi-dds` | Uses a Unix-domain socket and persistent state; verify jailbreak filesystem and lifecycle behavior |
 | FFI and shared memory | `yazi-ffi` (`shm`, macOS disk arbitration/IOKit modules) | `cfg(target_os = "macos")` modules do not automatically cover iOS; Unix shared memory, IOKit, and entitlements need separate decisions |
-| Clipboard | `yazi-widgets/src/clipboard.rs` and terminal clipboard sequences | Unix tries `pbcopy`/Termux/Wayland/X11 tools and emits OSC 52; iOS needs a bridge while preserving SSH behavior |
+| Clipboard | `yazi-widgets/src/clipboard/{clipboard,lookup,unix,ios,windows}.rs` and terminal clipboard sequences | iOS has a native device-pasteboard backend; the desktop/Android helper probes are excluded there |
 | Opener and external integrations | `yazi-config/src/open`, `opener`, preset rules, `yazi-cli/src/env/env.rs` | `xdg-open`, `open`, Windows, and Termux rules do not define an iOS opener; runtime integration must be explicit |
 | Mount/device discovery | `yazi-fs/src/mounts` | Linux and macOS monitor implementations exist; iOS needs a provider or a deliberate empty capability set |
 | Package manager | `yazi-cli/src/package` | Git, filesystem, archive, hashing, and deploy steps are optional runtime capabilities and not a reason to block launch |
@@ -180,8 +180,9 @@ The most important observations for later tasks are:
    `zoxide`, `7zz`/`7z`, `resvg`, `jq`, and clipboard commands. These probes are
    diagnostics, not launch requirements.
 10. **Openers and clipboard.** Default opener rules cover Linux, macOS, Windows, and
-    Android, while the clipboard implementation uses desktop/Termux/X11/Wayland
-    commands plus OSC 52. Neither area has an iOS policy yet.
+    Android, while the clipboard implementation used desktop/Termux/X11/Wayland
+    commands plus OSC 52. The clipboard half was resolved by Task 009; openers
+    still have no iOS policy.
 11. **Lua and native helpers.** The default `yazi-fm` feature uses vendored Lua, and
     native image/process helpers are spread across several crates. Their iOS build
     and runtime behavior must be tested independently rather than hidden behind a
@@ -293,7 +294,8 @@ Provide a local-device clipboard adapter for the jailbreak environment and retai
 OSC 52/terminal capability handling. In an SSH session, preserve the upstream
 remote-terminal behavior: prefer the terminal/remote path when appropriate and keep
 an in-process fallback when the remote side cannot answer. Clipboard failure must
-not make normal file operations fail.
+not make normal file operations fail. Task 009 implemented this; the policy it
+settled is recorded below.
 
 ### Terminal capability detection
 
@@ -362,6 +364,58 @@ non-macOS/non-Windows condition. Audit every Apple framework and shared-memory p
 against the iOS SDK and deployment model. DDS should either use a validated iOS
 transport or report that cross-instance communication is unavailable; its Unix
 socket is not an implicit requirement.
+
+## Task 009 Apple pasteboard adapter policy
+
+Task 009 turned the anticipated clipboard adapter into an implementation, and in doing
+so established a policy for reaching an Apple-only API from a jailbreak command-line
+process. That policy is reusable, so it is recorded here as the rule for this seam.
+
+**Where the adapter lives.** A framework binding belongs in `yazi-ffi`, next to the
+existing macOS Core Foundation and IOKit modules, and the caller keeps the platform
+decision to itself. `yazi-ffi/src/pasteboard.rs` is the whole iOS surface: it owns the
+Objective-C calls, the autorelease pool, and the "can this process reach the pasteboard
+at all" probe, and it exposes plain `&str`/`Vec<u8>` values. Nothing above it sees an
+Objective-C type, so a future opener, share sheet, or `ya` subcommand can reuse the
+adapter instead of growing a second one. The consumer,
+`yazi-widgets/src/clipboard/ios.rs`, owns only Yazi's policy: which clipboard answers, in
+which order, and how bytes become text.
+
+**Which API.** `UIPasteboard` is the only public pasteboard API on iOS. `NSPasteboard` is
+AppKit, and the Core Foundation pasteboard calls behind `pbcopy`/`pbpaste` on macOS are
+not part of the iOS SDK, so there is no Foundation-only or CoreFoundation-only
+alternative and no reason to reach for a private API. It needs no `UIApplication`
+lifecycle, which is what makes it usable from a process that has no app bundle, but it
+does assume an autorelease pool that nothing in a Rust CLI provides, so the adapter
+pushes one around every call.
+
+**Which binding.** The workspace already depends on `objc2` for macOS disk arbitration,
+and `objc2-ui-kit` with only its `UIPasteboard` feature is the maintained binding for this
+class. Typed bindings were preferred over handwritten `msg_send!` because they own the
+retain/release and `NSString` conversion a hand-rolled version would get wrong. The added
+crates are `target_os = "ios"`-only, so no other build, including the macOS build that
+already uses `objc2`, changes. `objc2-foundation` is requested with
+`default-features = false` and only the `std`/`NSString` features, because its default
+feature set is every Foundation class.
+
+**Availability is probed, not assumed.** `objc2-ui-kit` links UIKit strongly, so a system
+that cannot load it would fail at launch rather than at the pasteboard. The adapter
+therefore looks the class up through the Objective-C runtime first and reports unavailable
+instead of panicking. Whether a non-app process can load UIKit at all on a jailbroken
+device, and whether a read shows the system paste prompt, are the two questions a build
+cannot answer.
+
+**Failure is a capability, not an error.** The pasteboard is auxiliary. Every failure mode
+— no text on it, an image-only pasteboard, a locked device, a declined read prompt, a
+missing class — resolves to the in-process mirror, which is recorded verbatim on every
+`set()`. There is no retry, no panic, and no user-facing diagnostic, which matches how the
+desktop backend already degrades when no helper command is installed. The pasteboard
+daemon is reached over XPC and the first call in a process can block noticeably, so both
+directions run on a blocking thread rather than the thread that drives the UI.
+
+Compile success is not runtime evidence. Reading and writing the device pasteboard from a
+jailbroken terminal, and the paste prompt, must be confirmed on a physical device in both
+a local terminal and an SSH session.
 
 ## Runtime capability philosophy
 
