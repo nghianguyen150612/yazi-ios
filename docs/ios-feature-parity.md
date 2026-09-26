@@ -248,12 +248,144 @@ answer.
 is the compile evidence, including that UIKit links. Runtime success is not
 claimed; see `docs/ios-device-test-plan-clipboard.md`.
 
+## Task 010 evidence: opener
+
+The audit found that the platform enum could not name iOS at all.
+`yazi-config/src/platform.rs` listed `All`, `Linux`, `Macos`, `Windows`,
+`Android`, and `Unix`, so `for = "ios"` in a rule was a configuration error
+rather than a rule, and `[opener].open` had no iOS row. On an iOS build every
+platform row was therefore filtered out at load time and **opening a file did
+nothing at all**; the only thing an iOS user was offered for a photo was the
+generic `for = "unix"` `reveal` rule, which runs `exiftool` in a blocking
+terminal — the fall-through into unrelated Unix metadata behavior that Task 010
+exists to stop.
+
+**Platform identity.** `Platform::Ios` is a variant of its own, so `for = "ios"`
+parses and matches exactly one target. It is deliberately *not* a rename of
+`Macos` or a stand-in for `Android`, and it does not stop `Platform::Unix` from
+matching iOS: `cfg!(unix)` is true on `aarch64-apple-ios`, which is exactly why
+an iOS rule can be placed ahead of a Unix fallback and still be reachable. The
+matching table is one `match` on the target OS plus the `unix` flag, with
+`matches_on(os, unix)` separated from `matches()` so the table is exercised on
+every host rather than only on the target it describes.
+
+**Which API, and why not the public one.** The public way to hand a document to
+an app on iOS is `UIApplication`. It requires a `UIApplicationMain` lifecycle, a
+window, and main-thread execution, none of which a process without an app bundle
+has. `UIDocumentInteractionController` and `UIActivityViewController` are the
+same story: both need a view to present from. `LSOpenURL`/`LSOpenApplication`
+are macOS Launch Services C entry points that are not in the iOS SDK. What
+remains, and what a daemon, an SSH session, and a terminal all reach, is
+LaunchServices' `LSApplicationWorkspace` — a private CoreServices class, and the
+one the jailbreak `uiopen` family is itself built on.
+
+**Why the private interface is acceptable here.** It is resolved defensively
+rather than trusted: the framework is opened explicitly from the read-only
+system volume, the class is looked up through the Objective-C runtime instead of
+being linked, and each selector is probed with `respondsToSelector:` before it is
+sent. It also returns a `BOOL`, which is the reason it was chosen over
+`SBSOpenSensitiveURLAndUnlock` (what saurik's `uiopen` reaches through
+SpringBoardServices): a void function cannot distinguish "handed off" from "no
+app handles that", and that distinction is what makes an actionable diagnostic
+possible instead of a guess. The cost is recorded honestly — this is a private
+API, and it is the one place in the port that is.
+
+**Why there is no helper fallback.** The task's preferred ladder is native →
+optional helper → clear unsupported error, and the middle rung was evaluated
+rather than assumed. `uiopen` is widely installed and is the obvious candidate,
+but it is documented and used for bundle identifiers (`uiopen
+com.apple.mobilesafari`) and URL schemes (`uiopen prefs:root`); reports of it
+accepting a `file://` path are inconsistent across versions. Adopting it would
+make a third-party package a de-facto requirement for a capability the system
+already provides, and it would need a `file://` URL that cannot faithfully carry
+a non-UTF-8 filename. The native path is therefore the only backend, and its
+absence is reported as a capability rather than papered over. This is a
+deliberate narrowing of the preferred architecture, made from the evidence
+above.
+
+**Where the seam sits.** An opener rule is a command, so the iOS rows name
+`ya open`, and `yazi-ffi/src/launch.rs` is the whole Objective-C surface —
+`open(path, is_dir) -> Option<bool>` and nothing else. `yazi-cli/src/open/` owns
+Yazi's policy: resolve the path, decide whether it is a folder, and map the
+result to a diagnostic. Nothing above sees an Objective-C type, `open_do.rs` is
+untouched, and no `ShellOpt`, process-scheduling, or `Splatter` logic is
+duplicated. The rule is still matched, expanded, and run as an ordinary
+background process, which is what puts a failure message in Yazi's task list.
+
+**What each operation does now.**
+
+- *Edit.* Unchanged: `${EDITOR:-vi} %s` under `for = "unix"` still applies on
+  iOS, because iOS is Unix. A GUI handoff would be the wrong answer for a device
+  that has a terminal.
+- *Open.* `ya open %s1` hands the file to the application the device associates
+  with it. `%s1` makes `Splatter::spread` false, so `OpenDo::open_with` chunks
+  the selection into one invocation per file and a multi-file selection is
+  opened file by file rather than truncated to its first entry.
+- *Play.* The same handoff, as a separate rule so the option list still offers
+  `Play` alongside the generic Unix `Show media info`.
+- *Reveal.* `ya open %d1`, named **Reveal in Files**, which hands the *containing
+  folder* to Files. This matches what Android's `termux-open %d1` row already
+  does in the same preset. It is not Finder's `open -R`: iOS exposes no way to
+  select or highlight an item inside a folder, so calling it plain `Reveal` and
+  implying a selection would be a false claim, and opening the file itself would
+  be a different operation wearing the same name.
+
+**Paths.** The opener always hands over a real local path: `File::content_path()`
+resolves an archive member to its backing file and a remote/VFS URL to its local
+cache path, so no URL scheme, no `http`/`https` string, and no percent-encoding
+reaches this path. The bytes are the file's own — `NSURL` is built through
+`fileURLWithFileSystemRepresentation:`, which takes a C string, so a filename
+that is not valid UTF-8 is carried to LaunchServices unchanged and no
+`to_str().unwrap()` exists anywhere on the route. A path containing a NUL cannot
+come from the filesystem and is reported as an absent handoff rather than
+crashing.
+
+**Multi-file behavior.** One document per handoff, one invocation per file. The
+alternative — asking LaunchServices to open several URLs in one gesture — has no
+verifiable headless spelling and was not worth the risk for a selection the
+preset already fans out.
+
+**SSH.** Opening a file means opening it **on the iOS device**, because the file
+lives on the iOS filesystem. The handoff runs in a process on the device, and
+nothing in the path emits a terminal sequence, an OSC request, or a URL-open
+escape. Sending the request to the machine the user is typing into would try to
+open a file that machine has never seen. This is the opposite of the clipboard
+decision in Task 009, where OSC 52 *is* the right channel, and the difference is
+the subject of the file: the clipboard is a property of the terminal, the
+document is a property of the device.
+
+**Failure behavior.** Three named outcomes, all non-fatal and all visible in
+Yazi's task list because the rule runs as a background process: no application
+handles the document; the system does not expose the handoff; the path cannot be
+opened. The error is written to stderr and the process exits non-zero, so Yazi
+marks the task failed. There is no `|| true`, no retry, and no silent success.
+
+**What the host tests do and do not prove.** The new tests cover that every
+platform spelling parses and an unknown one is rejected; that iOS matches only
+iOS while `unix` still matches iOS and every other Unix target; that the host
+answers through the same table; that the **real default preset**, loaded and
+filtered for a described system, selects the iOS `open`/`play`/`reveal` rules
+ahead of the Unix fallbacks, keeps the Unix editor, and leaves the Linux, macOS,
+Windows, and Android rules exactly as they were; and that a missing path keeps
+its typed cause, that a path with a space and non-ASCII characters is carried
+into the diagnostic verbatim, and that every target in a multi-target list is
+handed off rather than only the first. **No host test exercises
+LaunchServices.** Whether `LSApplicationWorkspace` answers from a shell process
+on the device, whether a document is accepted over SSH, and whether Files opens
+a folder URL the way a directory open does are questions only a device can
+answer.
+
+**Status: COMPILE-VALIDATED / DEVICE-UNVERIFIED.** The `aarch64-apple-ios` build
+is the compile evidence, including that Foundation's `NSURL` links. No claim is
+made that a jailbroken device launches an app; see
+`docs/ios-device-test-plan-opener.md`.
+
 ## Feature inventory
 
 | Subsystem / Feature | Upstream behavior | Current iOS status | Expected implementation | Required external dependency | Requires real-device validation | Planned task |
 | --- | --- | --- | --- | --- | --- | --- |
 | Main file-manager executable | `yazi-fm` starts the TUI, initializes services, and serves the file manager | Build unvalidated; allocator and startup seams are platform-sensitive | Keep the `yazi-fm` lifecycle; add only iOS initialization adapters | Rust std; Apple SDK | Yes | TBD |
-| Companion `ya` CLI | `yazi-cli` provides version/environment diagnostics, DDS emit/exec, and package commands | Portable (source-level); iOS binary not built | Retain the CLI and defer `ya-ios` packaging/name changes to the installer task | Rust std; Git for package operations | Yes | TBD |
+| Companion `ya` CLI | `yazi-cli` provides version/environment diagnostics, DDS emit/exec, package commands, and `ya open` | Portable (source-level); iOS binary not built; `ya open` added in 010 as the platform seam the iOS opener rules name | Retain the CLI and defer `ya-ios` packaging/name changes to the installer task | Rust std; Git for package operations | Yes | TBD |
 | Startup arguments and client identity | `yazi-boot` parses entry paths, chooser files, client IDs, and runtime options | Portable (source-level) | Preserve argument semantics and validate path conversion on device | None | Yes | TBD |
 | Async runtime and core state | Shared local set, actor/core state, reconciler, invalidator, and proxy layers coordinate the UI | Portable (source-level) | Keep upstream event architecture; avoid platform branching in actors | Tokio | Yes | TBD |
 | Tabs and multiple working directories | Multiple tabs, per-tab CWD, peek, and cross-directory selection are supported | Portable (source-level) | Preserve tab/state model and adapt only CWD/path discovery | Rust std | Yes | TBD |
@@ -274,7 +406,7 @@ claimed; see `docs/ios-device-test-plan-clipboard.md`.
 | Virtual watcher | Remote/VFS URLs are watched through a separate virtual backend | Portable (source-level); remote behavior unvalidated | Preserve virtual watch model and capability errors | VFS provider | Yes | TBD |
 | Blocking shell commands | Scheduler runs `sh -c` with inherited stdio and pauses/resumes the app | iOS compiles the same `fork`+`exec` Unix path; spawn failures now name the actual cause; jailbreak runtime still unverified | Keep the Unix path and make spawn failure diagnostics actionable per cause | `sh`, libc process APIs | Yes | 008 |
 | Background and orphan commands | Background commands stream stdout/stderr; orphan commands detach with `setsid` | iOS retains `setsid` via `pre_exec`; the alternative `posix_spawn` route cannot express a new session on Apple; jailbreak runtime unverified | Keep the detach contract and validate it on a device | `sh`, libc, jailbreak process policy | Yes | 008 |
-| Openers and file reveal | MIME rules invoke configured commands such as `xdg-open`, `open`, `start`, or Termux tools | Expected platform adapter | Add an iOS opener/share provider and bulk-operation semantics | Platform opener or user-installed command | Yes | TBD |
+| Openers and file reveal | MIME rules invoke configured commands such as `xdg-open`, `open`, `start`, or Termux tools | iOS platform identity and opener rules added: `for = "ios"` parses and matches only iOS, `Platform::Unix` still matches it, and the default `open`/`play`/`reveal` rules hand the file to the device's own application through `ya open` and `yazi-ffi`; target compilation validated, device runtime unverified | Reach the associated application natively on the device; keep the Unix editor and metadata rules available | No required helper; private LaunchServices interface only | Yes | 010 |
 | Clipboard get/set | Unix tries pbcopy/Termux/Wayland/X11 tools; Windows uses a native API; OSC 52 is also emitted | iOS backend added: native `UIPasteboard` via `yazi-ffi`, no helper probing, mirror and OSC 52 preserved; target compilation validated, device runtime unverified | Reach the device pasteboard natively over a local terminal; keep the in-process mirror over SSH and always emit OSC 52 | UIKit `UIPasteboard`; OSC 52 support for the PC clipboard | Yes | 009 |
 | TTY handles and raw mode | Unix opens stdin/stdout or `/dev/tty`, uses termios, and restores terminal state | Expected platform adapter | Validate local device and SSH descriptors; keep fallback and restoration guarantees | `/dev/tty`, termios/rustix | Yes | TBD |
 | Terminal input parser | CSI u, Kitty keyboard, bracketed paste, mouse, resize, DND, and terminal reports are parsed | Expected platform adapter | Reuse parser and make unsupported reports non-fatal over SSH and local terminals | Terminal protocol support | Yes | TBD |
@@ -322,7 +454,7 @@ claimed; see `docs/ios-device-test-plan-clipboard.md`.
 | Rust target and Apple linking | Task 001 added an unsuppressed macOS `aarch64-apple-ios` baseline workflow | Task 001 CI observed the `uzers` blocker; Task 002 adds the iOS identity source path and explicit branch dispatch | Confirm the old errors are gone and record the next independent target blocker without suppressing failures | Xcode/iOS SDK; Rust target | Yes | 002 |
 | Existing desktop CI | Upstream tests and checks run on Linux, macOS, and Windows | Portable (source-level); must remain unchanged | Add an isolated iOS workflow and retain all existing jobs | GitHub Actions runners | No | TBD |
 | Linux-specific filesystem/mount behavior | `/proc`, inotify-style watcher selection, device metadata, and Linux libc calls are selected behind Linux cfgs | Portable (source-level) for desktop; not an iOS path | Do not port Linux assumptions to iOS; use adapters or explicit unsupported results | Linux kernel interfaces | Yes | TBD |
-| macOS-specific trash/mount/FFI | macOS has bespoke trash, disk arbitration, Core Foundation, and Objective-C code | Trash (003) and clipboard (009) have their own iOS implementations; disk arbitration and Core Foundation modules remain macOS-only | Reuse only APIs proven available on iOS; otherwise provide a separate adapter | Apple frameworks | Yes | TBD |
+| macOS-specific trash/mount/FFI | macOS has bespoke trash, disk arbitration, Core Foundation, and Objective-C code | Trash (003) and clipboard (009) have their own iOS implementations; disk arbitration and Core Foundation modules remain macOS-only; the opener (010) is a new iOS-only LaunchServices module rather than a shared one | Reuse only APIs proven available on iOS; otherwise provide a separate adapter | Apple frameworks | Yes | TBD |
 | Android-specific paths | Android has Termux opener/clipboard and unsupported trash cases | Portable (source-level) as a reference pattern | Use as a precedent for capability detection, not as an iOS implementation | Termux tools on Android | Yes | TBD |
 | iOS device system pasteboard | No upstream equivalent; the device pasteboard is what other iOS apps share | iOS-only adapter added in `yazi-ffi`; target compilation validated, device runtime and paste-prompt behavior unverified | Reach `UIPasteboard` natively, treat it as auxiliary, and keep the in-process mirror as the fallback | UIKit; jailbreak pasteboard access | Yes | 009 |
 | Rootful jailbreak environment | Upstream has no jailbreak-specific path or permission model | Uninvestigated | Discover and validate rootful paths, permissions, process policy, and service integration | Jailbreak-specific APIs/tools | Yes | TBD |

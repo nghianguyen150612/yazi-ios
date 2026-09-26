@@ -108,7 +108,7 @@ those executables or by the build/package tooling.
 | Area | Upstream implementation and entry points | iOS relevance |
 | --- | --- | --- |
 | File-manager executable | `yazi-fm/src/main.rs`; initializes shim, shared state, TTY, emulator, filesystem, VFS, Lua runner, image adapter, widgets, watcher, actors, and the app | Main runtime entry point; allocator, terminal, process, and platform initialization are high-risk |
-| Companion CLI | `yazi-cli/src/main.rs`, `yazi-cli/src/args.rs` | Provides `ya` version/environment, DDS emit/exec, and package commands; eventual `ya-ios` name is deferred |
+| Companion CLI | `yazi-cli/src/main.rs`, `yazi-cli/src/args.rs` | Provides `ya` version/environment, DDS emit/exec, package commands, and `ya open`; eventual `ya-ios` name is deferred |
 | Bootstrap and arguments | `yazi-boot`, `yazi-fm/src/root.rs`, `yazi-fm/src/executor.rs` | Startup path, client identity, working directory, and command-line behavior should remain portable |
 | Build/package helper | `yazi-build` (`xtask` alias), `yazi-packing` | Build profiles, release staging, `.deb`, and archive behavior are desktop/release concerns; do not pull packaging into the device port |
 | Core state and UI flow | `yazi-core`, `yazi-actor`, `yazi-fm`, `yazi-parser`, `yazi-proxy` | Mostly portable event/state logic; keep platform calls behind existing proxies |
@@ -286,7 +286,7 @@ Replace the absence of an iOS opener rule with a small capability provider that 
 hand a file to an installed jailbreak/application integration, share/open URL, or
 report that no opener exists. It must not assume that `open`, `xdg-open`, or
 Termux is present. Bulk open/reveal behavior should be defined in terms of the same
-provider.
+provider. Task 010 implemented this; the policy it settled is recorded below.
 
 ### Clipboard
 
@@ -414,8 +414,77 @@ daemon is reached over XPC and the first call in a process can block noticeably,
 directions run on a blocking thread rather than the thread that drives the UI.
 
 Compile success is not runtime evidence. Reading and writing the device pasteboard from a
-jailbroken terminal, and the paste prompt, must be confirmed on a physical device in both
+jailbreak terminal, and the paste prompt, must be confirmed on a physical device in both
 a local terminal and an SSH session.
+
+## Task 010 application opener adapter policy
+
+Task 010 turned the anticipated opener adapter into an implementation, and in
+doing so extended the Task 009 rule — a framework binding belongs in
+`yazi-ffi`, the caller keeps the platform decision — to a *command* rather than
+an in-process operation. That is the one structural decision worth stating
+first, because it is the one that shaped everything else.
+
+**Why the seam is a `ya` subcommand.** An opener rule is a command string. The
+alternatives were to branch inside `yazi-actor/src/mgr/open_do.rs`, or to add a
+new kind of process to the scheduler. Both would make the opener system an iOS
+special case and both would duplicate machinery that already works. Instead the
+iOS rows in the default preset name `ya open`, and `yazi-cli/src/open/` is the
+seam: `yazi-ffi/src/launch.rs` owns the Objective-C calls, `open/handoff.rs`
+owns Yazi's policy, and `open/open.rs` owns the argument list. The rule is still
+matched by `Platform`, still expanded by `Splatter`, and still run through
+`ShellOpt` as a background process, so a failure lands in Yazi's task list
+through the path that already exists for `xdg-open`. This is also why the
+existing default rules could name `ya pub extract` and `ya emit download`
+without anything new: an opener rule naming a `ya` subcommand is an established
+pattern in this preset, not a Task 010 invention.
+
+**Which API.** Not `UIApplication`, and not `UIDocumentInteractionController` or
+`UIActivityViewController`: all three need an app lifecycle or a view, which a
+process without a bundle does not have. `LSApplicationWorkspace` in LaunchServices
+is a private CoreServices class that a daemon, an SSH session, and a terminal
+can all reach, and it is what the jailbreak `uiopen` family is built on. It was
+chosen over SpringBoard's `SBSOpenSensitiveURLAndUnlock` for one reason that
+matters more than either of them: it returns a `BOOL`, so "nothing on this
+device handles that document" is a fact rather than a guess.
+
+**How the private surface is contained.** The framework is opened with `dlopen`
+from a `/System/Library/Frameworks/…` path, which is in the read-only system
+volume and therefore identical on rootful and rootless devices; the class is
+looked up through the Objective-C runtime rather than linked, so a system that
+does not have it reports unavailable instead of failing at launch; each selector
+is checked with `respondsToSelector:` before it is sent; and an autorelease pool
+is pushed around the call. This is the port's only private API, and it is
+recorded as such rather than presented as a supported one.
+
+**Why there is no helper fallback.** The preferred ladder was native → optional
+detected helper → clear unsupported error, and the middle rung was investigated
+rather than skipped. `uiopen` is the obvious candidate, but its documented and
+observed use is bundle identifiers and URL schemes, and its acceptance of a
+`file://` path is inconsistent across versions. Depending on it would make a
+third-party package a de-facto requirement for something the system already
+does, and it would require a `file://` URL that cannot carry a non-UTF-8
+filename. The ladder is therefore native → clear unsupported error, and the
+missing middle rung is a recorded decision rather than an omission. A future
+task that finds a well-supported helper may add it *below* the native path
+without changing this seam.
+
+**Reveal is not `open -R`.** iOS exposes no way to select or highlight an item
+inside a folder, so "reveal" on iOS means handing the containing folder to
+Files. That is what the default rule does, what Android's existing
+`termux-open %d1` row already does, and what the option is named for. The rule
+must not be tightened into a claim it cannot keep.
+
+**Encoding.** The handoff is a filesystem path, never a URL string:
+`File::content_path()` already resolves an archive member to its backing file
+and a remote URL to its local cache path, and `NSURL` is built through
+`fileURLWithFileSystemRepresentation:` so the file's own bytes cross the
+boundary. No `to_str()`, no `unwrap()`, and no percent-encoding is involved.
+
+Compile success is not runtime evidence. Handing a JPEG, a PDF, a folder, and a
+file with spaces or non-ASCII bytes to LaunchServices from a shell process, over
+a local terminal and over SSH, must be confirmed on a physical jailbroken device
+before any supported claim is made.
 
 ## Runtime capability philosophy
 
