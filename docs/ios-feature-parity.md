@@ -89,6 +89,69 @@ on a Linux host. Physical validation of terminal input, SIGWINCH resize, and
 waker wakeup through a real `/dev/tty` on a jailbroken device, over both a local
 terminal and SSH, remains required.
 
+## Task 008 evidence: process and shell execution
+
+Every shell task — blocking `:shell`, background, orphan, openers, hooks, and the
+configured editor — funnels through one function, `shell()` in
+`yazi-scheduler/src/process/shell.rs`, which runs `sh -c` with the working
+directory, stdio, and detachment derived from `ShellOpt`. That single choke point
+is what Task 008 audited.
+
+**Which spawn path is actually taken.** This is worth stating precisely, because
+it is not the one the API surface suggests. Rust's standard library reaches
+`posix_spawn` only when no `pre_exec` closure is registered: `pre_exec` pushes a
+closure, and a non-empty closure list makes the `posix_spawn` attempt return
+`Ok(None)` and fall back to `fork(2)` plus `execvp(2)`. Because `shell()`
+registers a `pre_exec` closure for every spawn, Yazi's shell path uses
+`fork`+`exec` on *every* Unix target, iOS included — not just on iOS. A working
+directory alone would not have forced this; it is the `setsid()` call that does.
+
+**Why the fork path is kept on iOS.** Replacing `pre_exec` is not a way to reach
+`posix_spawn` while preserving behavior:
+
+- `std::os::unix::process::CommandExt::setsid` exists but is unstable
+  (`process_setsid`, issue #105376), so it is unavailable on the stable toolchain
+  this repository targets.
+- Even if it were stable, the standard library only maps it to
+  `POSIX_SPAWN_SETSID` on `linux-gnu`. On Apple targets the `posix_spawn` attempt
+  bails out to `fork`+`exec`, so a session-creating `posix_spawn` does not exist
+  on Darwin at all.
+- `process_group(0)` *is* stable and does map to `POSIX_SPAWN_SETPGROUP`, but it
+  creates a new process group, not a new session. That is a different guarantee
+  from the `setsid()` the event loop and orphan handling depend on, and it cannot
+  be validated without a device.
+
+Trading a verified working path for an unverifiable semantic change is the worse
+outcome, so the fork+exec path is retained. The `pre_exec` closure is also
+async-signal-safe (it calls only `setsid()` and `last_os_error()`), which is what
+makes it legitimate between `fork` and `exec`.
+
+**Apple's documented API surface, and what it does and does not imply.** Apple's
+iOS manual-page archive documents `posix_spawn(2)` and `vfork(2)` but has no
+`fork(2)` page, and `libc` still declares `fork`, `setsid`, and `execvp` for
+every Unix target including iOS. The absent page reflects Apple's *supported*
+API surface for iOS rather than a removed kernel capability, and Yazi-iOS
+deliberately targets the jailbroken command-line environment rather than a
+stock App Store process sandbox. No runtime claim is made here: only a jailbroken
+device can confirm that `fork`+`exec` and `setsid` are permitted.
+
+**Shell resolution.** The shell is resolved as `sh` through `PATH` by
+`execvp(3)`, so the environment of whoever launched Yazi decides which shell
+interprets the command. It is intentionally not pinned to `/bin/sh` or to a
+jailbreak-manager path, because rootful and rootless layouts differ.
+
+**Failure behavior.** A missing shell and an unreachable working directory both
+surface from `spawn()` as `NotFound`, so the two were previously
+indistinguishable in the user-facing notification. `spawn_error()` now names the
+actual cause — missing shell, inaccessible working directory, denied process
+creation — and preserves the original error as the source for anything else.
+Failures stay non-fatal: the UI reports them and stays usable, which is the
+upstream contract.
+
+The new host tests cover the exit status, working directory, non-blocking and
+orphan detachment, and each diagnostic branch. They run `sh` on the host and
+therefore prove nothing about process creation on a jailbroken iOS device.
+
 ## Feature inventory
 
 | Subsystem / Feature | Upstream behavior | Current iOS status | Expected implementation | Required external dependency | Requires real-device validation | Planned task |
@@ -113,8 +176,8 @@ terminal and SSH, remains required.
 | Trash browsing and restore | Platform trash implementations support list, metadata, remove, restore, rename, and empty operations | iOS backend implemented in yazi-fs; target compilation validated; host functional tests passed; real-device runtime validation pending | Implement the iOS trash contract using ~/.local/share/Trash and Freedesktop .trashinfo format with collision resolution and copy fallback | Platform trash policy; no mandatory helper | Yes | 003 |
 | Local file watcher | `notify::RecommendedWatcher` is primary, with `PollWatcher` fallback and mount refresh callbacks | Expected platform adapter | Validate FSEvents/dispatch availability; retain polling and report capability | `notify`; optional platform notifications | Yes | TBD |
 | Virtual watcher | Remote/VFS URLs are watched through a separate virtual backend | Portable (source-level); remote behavior unvalidated | Preserve virtual watch model and capability errors | VFS provider | Yes | TBD |
-| Blocking shell commands | Scheduler runs `sh -c` with inherited stdio and pauses/resumes the app | Expected platform adapter | Use a validated shell/process provider; retain task and error semantics | `sh`, libc process APIs | Yes | TBD |
-| Background and orphan commands | Background commands stream stdout/stderr; orphan commands detach with `setsid` | Known blocker (source audit): iOS process policy and `setsid` behavior are unverified | Make local/SSH process capability explicit and gracefully report denial | `sh`, libc, jailbreak process policy | Yes | TBD |
+| Blocking shell commands | Scheduler runs `sh -c` with inherited stdio and pauses/resumes the app | iOS compiles the same `fork`+`exec` Unix path; spawn failures now name the actual cause; jailbreak runtime still unverified | Keep the Unix path and make spawn failure diagnostics actionable per cause | `sh`, libc process APIs | Yes | 008 |
+| Background and orphan commands | Background commands stream stdout/stderr; orphan commands detach with `setsid` | iOS retains `setsid` via `pre_exec`; the alternative `posix_spawn` route cannot express a new session on Apple; jailbreak runtime unverified | Keep the detach contract and validate it on a device | `sh`, libc, jailbreak process policy | Yes | 008 |
 | Openers and file reveal | MIME rules invoke configured commands such as `xdg-open`, `open`, `start`, or Termux tools | Expected platform adapter | Add an iOS opener/share provider and bulk-operation semantics | Platform opener or user-installed command | Yes | TBD |
 | Clipboard get/set | Unix tries pbcopy/Termux/Wayland/X11 tools; Windows uses a native API; OSC 52 is also emitted | Expected platform adapter | Add a jailbroken-device clipboard bridge while preserving SSH/terminal behavior | Platform pasteboard; OSC 52 support | Yes | TBD |
 | TTY handles and raw mode | Unix opens stdin/stdout or `/dev/tty`, uses termios, and restores terminal state | Expected platform adapter | Validate local device and SSH descriptors; keep fallback and restoration guarantees | `/dev/tty`, termios/rustix | Yes | TBD |
