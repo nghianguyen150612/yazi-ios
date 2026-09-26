@@ -318,6 +318,43 @@ does not permit ordinary process creation, return a clear capability error and k
 the UI and non-process tasks usable. SSH execution must be considered separately
 from local-device execution rather than hidden behind a desktop `sh` assumption.
 
+## Task 008 process capability policy
+
+Task 008 settled the process backend policy, so it is recorded here as the rule
+for this seam rather than as an anticipated adapter.
+
+All process execution passes through one function, `shell()` in
+`yazi-scheduler/src/process/shell.rs`. That is deliberate: blocking `:shell`,
+background, orphan, openers, hooks, and the configured editor all derive their
+working directory, stdio, and detachment from a single `ShellOpt`, so a
+platform-specific backend belongs there and nowhere else.
+
+The policy is to keep the Unix `fork`+`exec` path on iOS, and to report failure
+precisely rather than to substitute a different spawn mechanism. The reasoning
+is that Yazi-iOS targets the jailbroken command-line environment, where a shell
+and ordinary POSIX process creation are the premise, and where trading a working
+path for an unverifiable one would be a regression. Concretely:
+
+- Do not reach for `posix_spawn` on iOS. The `setsid()` that detaches background
+  and orphan commands must run between `fork` and `exec`, and the standard
+  library offers no stable way to express a new session through `posix_spawn` on
+  Darwin at all.
+- Do not replace `setsid()` with `process_group(0)`. It is stable and does map to
+  `POSIX_SPAWN_SETPGROUP`, but a new process group is a weaker guarantee than a
+  new session, and the difference cannot be measured without a device.
+- Do not pin the shell to an absolute path. It stays resolved through `PATH`, so
+  rootful and rootless environments both work.
+- Do not assume App Store process policy describes a jailbroken device. Apple's
+  iOS manual pages omit `fork(2)`, but that reflects the supported app API
+  surface rather than a removed kernel capability, and the port targets the
+  jailbroken environment deliberately.
+- Do not disable process support on iOS, and do not let a failure pass silently.
+  When creation is denied, the diagnostic names the cause.
+
+Compile success is not runtime evidence. `fork`+`exec`, `setsid`, and detachment
+must each be confirmed on a physical jailbroken device over both SSH and a local
+terminal before any supported claim is made.
+
 ### Allocator, FFI, and IPC
 
 Choose an allocator deliberately for iOS instead of inheriting the broad
