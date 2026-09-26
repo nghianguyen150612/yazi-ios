@@ -62,6 +62,8 @@ log                   = { version = "0.4.34", features = [ "release_max_level_of
 lru                   = "0.18.4"
 mlua                  = { version = "0.12.1", features = [ "anyhow", "async", "error-send", "lua55", "macros", "serde" ] }
 objc2                 = "0.6.4"
+objc2-foundation      = { version = "0.3.2", default-features = false, features = [ "std", "NSString" ] }
+objc2-ui-kit          = { version = "0.3.2", default-features = false, features = [ "std", "UIPasteboard" ] }
 ordered-float         = { version = "5.5.0", features = [ "serde" ] }
 parking_lot           = "0.12.5"
 paste                 = "1.0.15"
