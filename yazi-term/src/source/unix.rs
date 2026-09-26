@@ -91,8 +91,10 @@ fn read_complete<F: Read>(mut reader: F, buf: &mut [u8]) -> io::Result<usize> {
 
 /// A small abstraction over platform specific polling behavior.
 ///
-/// macOS `poll(2)` doesn't work on file descriptors to `/dev/tty` so we need to
-/// use `select(2)` instead. This provides a function which abstracts over the
+/// `poll(2)` doesn't support devices, so it can't report terminal readiness:
+/// Apple's `poll(2)` man page documents this under BUGS for macOS and iOS
+/// alike, and a terminal is a character device. Apple targets therefore wait
+/// with `select(2)` instead. This provides a function which abstracts over the
 /// parts of `poll(2)` and `select(2)` we want. Specifically we are looking for
 /// `POLLIN` events from `poll(2)` and we consider that to be "ready."
 ///
@@ -101,7 +103,7 @@ fn read_complete<F: Read>(mut reader: F, buf: &mut [u8]) -> io::Result<usize> {
 /// allow polling exactly three FDs at a time - the exact amount we need for the
 /// event source.
 fn poll(fds: [BorrowedFd<'_>; 3], timeout: Option<Duration>) -> io::Result<[bool; 3]> {
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 	fn poll3(fds: [BorrowedFd<'_>; 3], timeout: Option<&Timespec>) -> io::Result<[bool; 3]> {
 		use rustix::event::{PollFd, PollFlags};
 		let mut fds = [
@@ -119,7 +121,7 @@ fn poll(fds: [BorrowedFd<'_>; 3], timeout: Option<Duration>) -> io::Result<[bool
 		])
 	}
 
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "ios"))]
 	fn select3(fds: [BorrowedFd<'_>; 3], timeout: Option<&Timespec>) -> io::Result<[bool; 3]> {
 		use std::os::fd::AsRawFd;
 
@@ -143,7 +145,7 @@ fn poll(fds: [BorrowedFd<'_>; 3], timeout: Option<Duration>) -> io::Result<[bool
 		Ok(result)
 	}
 
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "ios"))]
 	// rustix rounds nanoseconds up to microseconds for select(), which can produce tv_usec =
 	// 1_000_000.
 	let timeout = timeout.map(|t| Duration::new(t.as_secs(), t.subsec_micros() * 1000));
@@ -152,8 +154,86 @@ fn poll(fds: [BorrowedFd<'_>; 3], timeout: Option<Duration>) -> io::Result<[bool
 		io::Error::new(io::ErrorKind::InvalidInput, "timeout is too large for the platform")
 	})?;
 
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 	return poll3(fds, timespec.as_ref());
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "ios"))]
 	return select3(fds, timespec.as_ref());
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{io::Write, time::Instant};
+
+	use super::*;
+
+	/// Three connected socket pairs standing in for the terminal, SIGWINCH, and
+	/// waker descriptors. Sockets are reported by both `poll(2)` and `select(2)`,
+	/// so these cover the abstraction's readiness and timeout handling on any
+	/// Unix host. They do not reproduce a tty, and so cannot exercise the Darwin
+	/// device limitation that motivates `select(2)` — that still needs real
+	/// terminal descriptors on a real device.
+	fn triple() -> [(UnixStream, UnixStream); 3] {
+		std::array::from_fn(|_| UnixStream::pair().unwrap())
+	}
+
+	fn readers(fds: &[(UnixStream, UnixStream); 3]) -> [BorrowedFd<'_>; 3] {
+		std::array::from_fn(|i| fds[i].0.as_fd())
+	}
+
+	#[test]
+	fn reports_a_readable_terminal_fd() {
+		let mut fds = triple();
+		fds[0].1.write_all(b"x").unwrap();
+
+		assert_eq!(poll(readers(&fds), None).unwrap(), [true, false, false]);
+	}
+
+	#[test]
+	fn reports_a_readable_signal_pipe() {
+		let mut fds = triple();
+		fds[1].1.write_all(b"x").unwrap();
+
+		assert_eq!(poll(readers(&fds), None).unwrap(), [false, true, false]);
+	}
+
+	#[test]
+	fn reports_a_readable_wakeup_fd() {
+		let mut fds = triple();
+		fds[2].1.write_all(b"x").unwrap();
+
+		assert_eq!(poll(readers(&fds), None).unwrap(), [false, false, true]);
+	}
+
+	#[test]
+	fn reports_every_ready_fd() {
+		let mut fds = triple();
+		for (_, w) in &mut fds {
+			w.write_all(b"x").unwrap();
+		}
+
+		assert_eq!(poll(readers(&fds), None).unwrap(), [true, true, true]);
+	}
+
+	#[test]
+	fn times_out_when_nothing_is_ready() {
+		let fds = triple();
+
+		let start = Instant::now();
+		assert_eq!(poll(readers(&fds), Some(Duration::from_millis(50))).unwrap(), [false; 3]);
+		assert!(start.elapsed() >= Duration::from_millis(50), "returned before the timeout");
+	}
+
+	/// Readiness must not carry over between calls, since the event source
+	/// re-polls the same descriptors until it drains them.
+	#[test]
+	fn does_not_repeat_a_drained_fd() {
+		let mut fds = triple();
+		fds[0].1.write_all(b"x").unwrap();
+
+		assert_eq!(poll(readers(&fds), None).unwrap(), [true, false, false]);
+
+		let mut buf = [0; 8];
+		assert_eq!(fds[0].0.read(&mut buf).unwrap(), 1);
+		assert_eq!(poll(readers(&fds), Some(Duration::ZERO)).unwrap(), [false; 3]);
+	}
 }

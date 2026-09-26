@@ -46,6 +46,49 @@ non-UTF-8 name copying; they do not prove the libc behavior of an iOS runtime.
 The target workflow result must be used for compile evidence, and a jailbroken
 physical device is still required for runtime validation.
 
+## Task 007 evidence: terminal event waiting
+
+The Unix event source in `yazi-term/src/source/unix.rs` waits on exactly three
+descriptors, in this order: the terminal input descriptor from `yazi-tty`
+(stdin, or `/dev/tty` when stdin is not a tty), the nonblocking
+`signal_hook` SIGWINCH pipe, and the internal waker pipe pair. It reduces them
+to a three-element readiness array and preserves the existing contract: wakeup
+wins over input, input wins over resize, resize reads
+`termios::tcgetwinsize`, and the parser expires on every other return.
+
+Before Task 007, `target_os = "ios"` selected the `poll(2)` path while macOS
+selected `select(2)`. The upstream reason for the split was stated only as "macOS
+`poll(2)` doesn't work on file descriptors to `/dev/tty`", so the iOS choice was
+unjustified rather than measured. Task 007 verified the limitation instead of
+assuming it, because the same `cfg(unix)`/Darwin reasoning does not otherwise
+transfer automatically to iOS.
+
+The limitation is documented by Apple for both platforms. The `poll(2)` man
+page in Apple's iOS archive states under BUGS that "the `poll()` system call
+currently does not support devices", and a terminal is a character device. This
+is a property of the Darwin/XNU kernel rather than of macOS specifically, and
+`select(2)` has no equivalent restriction in the iOS man page. Rustix confirms
+the required API is available on iOS: `select`, `FdSetElement`, `FdSetIter`,
+`fd_set_insert`, and `fd_set_num_elements` are gated on `bsd`, and rustix's
+`build.rs` enables `bsd` for `macos`, `ios`, `tvos`, `visionos`, and `watchos`.
+No new dependency was added; the workspace already enables rustix's `event`
+feature.
+
+Task 007 therefore extended the existing macOS `cfg` to cover iOS and reused the
+single `select3` implementation rather than duplicating it. The `poll(2)` path,
+its timeout conversion, the nonblocking semantics, and the three-descriptor
+contract are unchanged for every other target, so Linux and the BSDs are
+untouched.
+
+Evidence is still incomplete in two respects. The new unit tests drive the
+abstraction with connected socket pairs, which both `poll(2)` and `select(2)`
+report, so they cover readiness, timeout, multi-descriptor, and drained-descriptor
+handling but cannot reproduce a character device and therefore cannot demonstrate
+the `poll(2)` limitation itself. Nor can they exercise the iOS `select(2)` branch
+on a Linux host. Physical validation of terminal input, SIGWINCH resize, and
+waker wakeup through a real `/dev/tty` on a jailbroken device, over both a local
+terminal and SSH, remains required.
+
 ## Feature inventory
 
 | Subsystem / Feature | Upstream behavior | Current iOS status | Expected implementation | Required external dependency | Requires real-device validation | Planned task |
@@ -113,7 +156,7 @@ physical device is still required for runtime validation.
 | Drag and drop | OSC 72 DND sequences exchange paths and data with terminals/plugins | External capability | Preserve protocol; degrade if terminal does not support it | Terminal OSC 72 support | Yes | TBD |
 | Terminal clipboard OSC 52 | Clipboard writes and capability probes use OSC 52 | External capability | Use when supported and retain in-process/SSH fallback | Terminal OSC 52 support | Yes | TBD |
 | Multiplexer support | tmux and Zellij passthrough/sixel behavior is detected and adjusted | External capability | Preserve mux abstraction and capability probing | `tmux`/Zellij and terminal passthrough | Yes | TBD |
-| Signals and resize | Unix signal hooks, SIGWINCH, and terminal restorers coordinate lifecycle events | Expected platform adapter | Validate iOS signal/descriptor behavior without changing desktop paths | Unix signals; terminal | Yes | TBD |
+| Signals and resize | Unix signal hooks, SIGWINCH, and terminal restorers coordinate lifecycle events | iOS shares the Apple `select(2)` wait path for terminal, SIGWINCH pipe, and waker descriptors; polling abstraction unit-tested on the host; real-device behavior pending | Keep the shared Darwin wait path and validate SIGWINCH delivery on a physical device | Unix signals; terminal | Yes | 007 |
 | Shared memory for graphics | Kitty image transport can use POSIX shared memory with a base64 fallback | Expected platform adapter; iOS availability unvalidated | Keep base64 fallback and gate shared memory by capability | POSIX shared memory; terminal | Yes | TBD |
 | Foreign-function interfaces | `yazi-ffi` wraps libc/rustix shared memory and macOS Core Foundation/IOKit/Objective-C facilities | Known blocker (source audit): iOS-specific framework availability is not established | Audit each FFI dependency against iOS SDK and entitlements | Apple SDK; jailbreak APIs | Yes | TBD |
 | Allocator and memory behavior | jemalloc is selected for non-macOS/non-Windows targets, which includes iOS in the baseline | iOS uses native system allocator; jemalloc excluded on iOS target; target compilation validated | Select a supported allocator or prove the existing one on iOS | Native allocator/build toolchain | Yes | 005 |

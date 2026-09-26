@@ -165,7 +165,9 @@ The most important observations for later tasks are:
    measured on-device.
 6. **Terminal and SSH.** `yazi-term` uses Unix termios, signal hooks, poll/select,
    Unix stream pairs, and `/dev/tty`; `yazi-tty` opens standard file descriptors or
-   `/dev/tty`. These are the primary SSH and jailbroken-terminal seams.
+   `/dev/tty`. These are the primary SSH and jailbroken-terminal seams. Task 007
+   resolved the descriptor-waiting half of this seam for iOS; see the Darwin
+   terminal waiting strategy below.
 7. **Process spawning.** The scheduler launches `sh -c` and calls
    `libc::setsid` in `pre_exec` for detached commands. iOS process policy, shell
    availability, stdio inheritance, signals, and background/orphan semantics may
@@ -211,6 +213,36 @@ isolation, secure-directory ownership checks, filesystem metadata, and the
 is an identity adapter, not a claim that the full filesystem subsystem builds
 or has run on a physical device; target CI and real-device validation remain
 separate evidence.
+
+## Task 007 Darwin terminal waiting strategy
+
+Terminal event waiting is a reusable Apple-wide strategy rather than an iOS-only
+special case, so it is recorded here as the seam other Apple subsystems should
+follow when they must observe a terminal descriptor.
+
+`yazi-term` waits on exactly three descriptors through one private `poll`
+abstraction: the terminal input descriptor, the SIGWINCH pipe, and the waker
+pair. Apple targets must use `select(2)`, because `poll(2)` cannot report
+readiness for devices and a tty is a character device. Apple documents this in
+the `poll(2)` BUGS section of both its macOS and its iOS manual pages, so the
+restriction is a Darwin kernel property that iOS inherits rather than a macOS
+quirk. Selecting a wait primitive by `target_os = "macos"` alone therefore left
+iOS on a path that cannot observe its own terminal.
+
+The strategy generalizes to any Apple target. Rustix gates `select` and the
+`FdSet` helpers on its `bsd` feature, which its `build.rs` enables for `macos`,
+`ios`, `tvos`, `visionos`, and `watchos`, so one `select`-based path can serve
+all of them with no added dependency. `select3` is written against the
+descriptors Yazi's TTY abstraction already supplies and keeps the poll interface
+of exactly three descriptors, so the change is confined to the `cfg`
+predicate. Consumers must not branch on platform themselves.
+
+Two consequences are worth carrying forward. First, a Darwin limitation should
+be verified against Apple documentation for the specific target rather than
+inferred from a sibling platform, which is what Task 007 did. Second, the
+host-side tests use socket pairs because both primitives report sockets, so
+they validate the abstraction's contract but never the device limitation
+itself; only a real terminal descriptor on a physical device closes that gap.
 
 ## Anticipated iOS adapters
 
