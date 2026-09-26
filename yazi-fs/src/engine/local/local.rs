@@ -196,6 +196,11 @@ impl<'a> Engine for Local<'a> {
 			{
 				Err(io::Error::new(io::ErrorKind::Unsupported, "Unsupported OS for trash operation"))
 			}
+			#[cfg(target_os = "ios")]
+			{
+				use crate::trash::Trash;
+				Trash::new()?.move_to_trash(&path)
+			}
 			#[cfg(target_os = "macos")]
 			{
 				use trash::{TrashContext, macos::{DeleteMethod, TrashContextExtMacos}};
@@ -203,7 +208,7 @@ impl<'a> Engine for Local<'a> {
 				ctx.set_delete_method(DeleteMethod::NsFileManager);
 				ctx.delete(path).map_err(io::Error::other)
 			}
-			#[cfg(all(not(target_os = "macos"), not(target_os = "android")))]
+			#[cfg(all(not(target_os = "macos"), not(target_os = "android"), not(target_os = "ios")))]
 			{
 				trash::delete(path).map_err(io::Error::other)
 			}

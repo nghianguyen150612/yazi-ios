@@ -9,8 +9,14 @@ yazi_macro::mod_flat!(macos);
 #[cfg(windows)]
 yazi_macro::mod_flat!(windows);
 
-#[cfg(trash_freedesktop)]
+#[cfg(all(trash_freedesktop, not(target_os = "ios")))]
 yazi_macro::mod_flat!(freedesktop);
+
+#[cfg(target_os = "ios")]
+yazi_macro::mod_flat!(ios);
+
+#[cfg(all(test, not(target_os = "ios")))]
+pub mod ios;
 
 #[cfg(trash_unsupported)]
 yazi_macro::mod_flat!(unsupported);

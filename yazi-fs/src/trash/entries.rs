@@ -7,7 +7,7 @@ use super::{TrashEntry, TrashId};
 pub(crate) struct TrashEntries(Vec<TrashEntry>);
 
 impl TrashEntries {
-	fn new(mut entries: Vec<TrashEntry>) -> Self {
+	pub(super) fn new(mut entries: Vec<TrashEntry>) -> Self {
 		entries.sort_unstable_by_key(|entry| entry.rel().components().count());
 
 		let mut seen = Vec::<TrashId>::with_capacity(entries.len());
