@@ -399,7 +399,7 @@ made that a jailbroken device launches an app; see
 | File metadata and attributes | `Cha` models kind, mode, ownership, timestamps, device IDs, and link counts | iOS compile path implemented for current identity lookup; metadata and device behavior still require validation | Keep real Unix UID/GID metadata and map iOS/jailbreak filesystem capabilities honestly | Rust std/libc metadata | Yes | TBD |
 | Case-insensitive filename handling | Linux, Android, macOS, Windows, NetBSD, and OpenBSD have specialized case-folding paths | iOS implementation added sharing Darwin F_GETPATH / O_SYMLINK path; target compilation validated; real-device behavior pending | Add an iOS path/final-path implementation or a deliberately tested fallback | Apple filesystem APIs or libc | Yes | 004 |
 | Path expansion and URL normalization | XDG, home, tilde, absolute/relative, view URLs, and path cleaning are centralized in `yazi-fs`/`yazi-shared` | Expected platform adapter | Preserve `Url`/`Path` contracts; provide iOS platform roots and permission-aware expansion | Rust std; jailbreak path layout | Yes | TBD |
-| XDG, config, state, runtime, and temp directories | Unix builds use XDG variables and home-directory fallbacks; other platforms have separate paths | iOS current-UID suffix has a native lookup path; the overall iOS path policy remains unvalidated | Define rootful/rootless iOS locations and a safe runtime/temp policy without replacing the real UID | Rust std; jailbreak environment | Yes | TBD |
+| XDG, config, state, runtime, and temp directories | Unix builds use XDG variables and home-directory fallbacks; other platforms have separate paths | iOS policy implemented (Task 014): native passwd home fallback, fixed `/tmp` runtime fallback for cross-session DDS, deterministic short-socket fallback within the Darwin 103-byte limit; target and device validation required | Define rootful/rootless iOS locations and a safe runtime/temp policy without replacing the real UID | Rust std; jailbreak environment | Yes | 014 |
 | Mount and device discovery | Linux monitors `/proc`; macOS uses disk arbitration; generic partition metadata is used for refresh/sound decisions | iOS provider implemented (Task 013): `getfsstat` enumeration plus 10-second snapshot polling; `soundless`/`timeless` lookup active via `st_dev`; target and device validation required | Keep the `getfsstat` provider; no private-framework dependency | Yes | 013 |
 | Trash browsing and restore | Platform trash implementations support list, metadata, remove, restore, rename, and empty operations | iOS backend implemented in yazi-fs; target compilation validated; host functional tests passed; real-device runtime validation pending | Implement the iOS trash contract using ~/.local/share/Trash and Freedesktop .trashinfo format with collision resolution and copy fallback | Platform trash policy; no mandatory helper | Yes | 003 |
 | Local file watcher | notify 8.2.0 resolves `RecommendedWatcher` to `KqueueWatcher` on iOS; Yazi uses one-second `PollWatcher` for all iOS local paths | Source-verified policy; target build and runtime status below | Nonrecursive kqueue cannot observe edits to existing child files that Yazi does not register individually; PollWatcher also follows delete/recreate paths. Device behavior remains DEVICE-UNVERIFIED | notify kqueue; PollWatcher | Yes | TBD |
@@ -697,3 +697,83 @@ status.
 `src`/`dist`/`fstype` strings, `st_dev` association, capacity sanity, mount/unmount
 callbacks, failure preservation, or rootful/rootless/SSH behavior. See [the
 Task 013 mount device test plan](ios-device-test-plan-mounts.md).
+
+### Task 014: iOS runtime paths
+
+**SOURCE-VERIFIED.** Every `Xdg` consumer was traced: config (`yazi.toml`,
+`keymap.toml`, `theme.toml`, `vfs.toml`, `package.toml`, `flavors/`,
+`plugins/`, `init.lua`, `ya env`), cache/assets (`packages/`, plugin
+dependencies), state (`yazi.log`, `.dds` persistence), runtime
+(`ya.runtime_dir` Lua, DDS socket parent), temp (preview `cache_dir` default,
+remote `cache_root`/`stamp_root`, `File::cache` buckets), and DDS
+(`runtime/.dds.sock` bind/connect plus `state_dir/.dds`). `yazi_fs::init()`
+eagerly loads all five XDG roots, so a missing home previously panicked via
+`.expect`.
+
+`dirs::home_dir()` on iOS is HOME-only: locked `dirs-sys 0.5.0` returns `None`
+from its `fallback()` for `ios`/`android`/`emscripten`, with no `getpwuid_r`
+attempt, unlike other Unix targets. `std::env::temp_dir()` on Unix is
+`TMPDIR` else `/tmp`, so local and SSH sessions with different `TMPDIR` values
+previously derived different DDS runtimes and fragmented the socket namespace.
+
+The iOS home fallback reuses the Task 002 identity seam rather than adding a
+second parser: `yazi-shim/src/uzers/ios.rs` gains `Uzers::home_dir()` via the
+existing `lookup()`/`copy_name()` `getpwuid_r` path, returning the passwd
+`pw_dir` (empty maps to not-found, bytes preserved losslessly). The Unix
+companion in `uzers/unix.rs` exposes the `uzers` cache home so relative `HOME`
+can still fall back to passwd on desktop. Precedence is preserved: absolute `YAZI_CONFIG_HOME` wins on every
+platform (including Windows, checked before the Windows/Unix split) →
+`XDG_CONFIG_HOME/yazi` → `HOME/.config/yazi`,
+`XDG_CACHE_HOME/yazi` → `HOME/.cache/yazi`,
+`XDG_STATE_HOME/yazi` → `HOME/.local/state/yazi`; valid absolute overrides
+always win and relative XDG values remain rejected. `HOME` itself must be
+absolute; empty/relative falls through to passwd. Only when both are absent
+does the loader panic, now with an explicit HOME/passwd message instead of an
+opaque expect. No `/var/mobile` or `/var/root` literal is used; those strings
+appear only as values returned by env or passwd.
+
+Runtime on iOS is `XDG_RUNTIME_DIR` if absolute, else fixed `/tmp`, plus
+`yazi+UID`, so incidental `TMPDIR` differences do not fragment DDS while an
+explicit user override still creates its own namespace. Temp remains
+`TMPDIR`-aware (`env::temp_dir()` if absolute else `/tmp`) plus `yazi-UID`,
+keeping temp and state distinct. `create_owned_dir()` is untouched: 0700
+create, `O_DIRECTORY | O_NOFOLLOW` open, `st_uid` check, `fchmod(0700)`, with
+creation errors surfacing where the directory is needed (DDS bind, log/state
+creation) rather than inside pure path selection.
+
+Darwin `sockaddr_un` is source-verified in `libc 0.2.186`
+`unix/bsd/mod.rs` as `sun_len: u8, sun_family, sun_path: [c_char; 104]`,
+shared by all Apple targets, so the maximum filesystem pathname payload is
+103 bytes excluding the terminating NUL (104 bytes of `sun_path` storage
+including the terminating NUL). Linux is 108/107. Production computes the limit from the
+target's own `libc::sockaddr_un` (`sun_path.len()-1`); tests inject the limit
+so Linux hosts exercise the 103-byte iOS policy without depending on it.
+`Xdg::dds_socket_for()` returns `<runtime>/.dds.sock` when its byte length
+fits, otherwise `/tmp/yazi-dds-UID-<32hex>/.dds.sock` where the hash is the
+full 128-bit `XxHash3_128` over the original runtime's raw OS bytes plus the UID,
+rendered as 32 lowercase hex digits. No truncation, no UTF-8 string hashing, no random value,
+no jailbreak path: same runtime plus UID always yields the same fallback,
+different UIDs and different namespaces do not collide, and the fallback
+parent goes through the same `create_owned_dir` ownership/mode gate. Stale
+`.dds.sock` removal, per-UID namespaces, and Tokio Unix sockets are unchanged;
+TCP was not introduced.
+
+Host validation passed: `cargo check -p yazi-fs`, `cargo test -p yazi-fs`
+(62 tests, including 22 new home/XDG/runtime/temp/socket-policy tests with
+synthetic values, non-UTF-8, UID separation, and byte-vs-char checks),
+`cargo check -p yazi-dds`, `cargo test -p yazi-dds` (6 tests, including UDS
+bind/connect/stale-replace, permission checks, oversized-path failure mode,
+and injected-limit fallback), and `cargo check -p yazi-fm`. `cargo metadata
+--locked --no-deps` and `git diff --check` pass. Nightly `rustfmt` remains
+UNAVAILABLE / PRE-EXISTING TOOLCHAIN MISMATCH (no rustup shim); nearby
+formatting was preserved and no unrelated files were reformatted. Local
+`aarch64-apple-ios` checks are environment-gated (this host lacks the target
+standard library); the exact-commit **iOS Baseline** build is authoritative
+for **COMPILE-VALIDATED** status.
+
+**DEVICE-UNVERIFIED.** No jailbroken device has validated passwd homes for
+root/mobile, local vs SSH `HOME`/`TMPDIR` agreement, 0700 parents, cross-UID
+isolation, rootful/rootless layouts, long-path fallback binding, or failure
+diagnostics. See [the Task 014 runtime-path device test plan](ios-device-test-plan-runtime-paths.md).
+
+**COMPILE-VALIDATED / DEVICE-UNVERIFIED.**

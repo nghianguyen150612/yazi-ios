@@ -374,9 +374,48 @@ terminal before any supported claim is made.
 
 Choose an allocator deliberately for iOS instead of inheriting the broad
 non-macOS/non-Windows condition. Audit every Apple framework and shared-memory path
-against the iOS SDK and deployment model. DDS should either use a validated iOS
-transport or report that cross-instance communication is unavailable; its Unix
-socket is not an implicit requirement.
+against the iOS SDK and deployment model. DDS keeps its Unix socket on iOS
+under the Task 014 runtime-path policy below; its socket is still not an
+implicit requirement for browsing when the transport cannot bind.
+
+## Task 014 iOS runtime-path policy
+
+Task 014 turns the anticipated filesystem-path adapter into a concrete policy
+for config, cache, state, runtime, temp, and DDS, and it is recorded here as
+the rule for this seam because later tasks (trash, watcher, VFS, plugins)
+resolve locations through the same roots.
+
+**Where the policy lives.** Home identity stays in `yazi-shim/src/uzers`
+(`ios.rs` gains `home_dir()` through the existing reentrant `getpwuid_r`
+lookup; `unix.rs` exposes the desktop cache home so the same fallback exists
+there). Path selection stays pure in `yazi-fs/src/xdg.rs`
+(`config_override_for`/`home_for`/`config_dir_for`/`asset_dir_for`/`state_dir_for`/
+`runtime_for`/`temp_for` take explicit inputs and never touch env, so tests use synthetic
+values and never mutate process env). Socket sizing stays in
+`yazi-dds/src/stream.rs` via `Xdg::dds_socket_for()` plus
+`Xdg::max_uds_path_len()`. `yazi-fs/src/fns.rs` is unchanged: the
+`create_owned_dir()` 0700/`O_NOFOLLOW`/UID/`fchmod` gate is the security
+boundary DDS already calls.
+
+**Precedence.** Valid absolute overrides always win; relative XDG values are
+rejected exactly as before. Config, cache, and state fall back to an absolute
+`HOME`, else the native passwd home, else a clear HOME/passwd panic message
+rather than an opaque expect. Runtime on iOS ignores incidental `TMPDIR` and
+uses fixed `/tmp` plus `yazi+UID` unless the user set an absolute
+`XDG_RUNTIME_DIR`; temp stays `TMPDIR`-aware plus `yazi-UID`. Both remain
+absolute, writable, UID-separated, and deterministic for peers that need the
+same DDS namespace. No `/var/mobile`, `/var/root`, `/var/jb`, or preboot
+literal appears in normal-operation branches.
+
+**Socket length.** Darwin maximum filesystem pathname payload is 103 bytes
+excluding the terminating NUL (104 bytes of `sun_path` storage including the
+terminating NUL, source-verified in `libc`), Linux 107; production derives the limit from its
+own `libc::sockaddr_un` and tests inject it. Overlong sockets fall back to
+`/tmp/yazi-dds-UID-<hash>` (full 128-bit raw-byte `XxHash3_128` of the original runtime
+plus UID, 32 hex digits; at most 67 bytes even for `u32::MAX`), whose parent gets the same ownership/mode gate. Normal-length
+sockets, desktop precedence, Windows paths, and stale-socket cleanup are
+unchanged. Compile success is not runtime evidence; see
+`docs/ios-device-test-plan-runtime-paths.md`.
 
 ## Task 009 Apple pasteboard adapter policy
 

@@ -1,4 +1,4 @@
-use std::{ffi::OsString, mem::MaybeUninit, ptr};
+use std::{ffi::OsString, mem::MaybeUninit, path::PathBuf, ptr};
 
 use super::{
 	Uzers,
@@ -25,6 +25,8 @@ impl Uzers {
 	pub fn group_name(gid: Option<u32>) -> Option<OsString> {
 		group(gid.unwrap_or_else(Self::gid)).ok().flatten()
 	}
+
+	pub fn home_dir() -> Option<PathBuf> { home(Self::uid()).ok().flatten().map(PathBuf::from) }
 }
 
 fn user(uid: u32) -> Result<Option<OsString>, LookupError> {
@@ -106,4 +108,41 @@ fn name(name: *const libc::c_char, buffer: &[u8]) -> Option<OsString> {
 
 	let offset = (name as usize).checked_sub(buffer.as_ptr() as usize)?;
 	copy_name(buffer, offset)
+}
+
+fn home(uid: u32) -> Result<Option<OsString>, LookupError> {
+	lookup(uid, |uid, buffer| {
+		let mut passwd = MaybeUninit::<libc::passwd>::uninit();
+		let mut result = ptr::null_mut();
+
+		// SAFETY: `passwd` and `result` are valid writable pointers, and `buffer` owns
+		// exactly the writable byte range passed to the reentrant libc lookup.
+		let status = unsafe {
+			libc::getpwuid_r(
+				uid,
+				passwd.as_mut_ptr(),
+				buffer.as_mut_ptr().cast(),
+				buffer.len(),
+				&mut result,
+			)
+		};
+		if status == libc::ERANGE {
+			return Attempt::Retry;
+		} else if status != 0 {
+			return Attempt::Error(status);
+		} else if result.is_null() {
+			return Attempt::NotFound;
+		} else if !ptr::eq(result, passwd.as_mut_ptr()) {
+			return Attempt::Error(libc::EINVAL);
+		}
+
+		// SAFETY: a successful lookup initialized `passwd` and returned that same
+		// address, as required by the `_r` API contract.
+		let passwd = unsafe { passwd.assume_init_ref() };
+		match name(passwd.pw_dir, buffer) {
+			Some(dir) if !dir.is_empty() => Attempt::Found(dir),
+			Some(_) => Attempt::NotFound,
+			None => Attempt::Error(libc::EINVAL),
+		}
+	})
 }
