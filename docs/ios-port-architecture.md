@@ -115,7 +115,7 @@ those executables or by the build/package tooling.
 | TTY and terminal I/O | `yazi-tty`, `yazi-term`, `yazi-tui` | Unix file descriptors, `/dev/tty`, termios, resize signals, terminal modes, and process stdio need device/SSH validation |
 | Terminal capability detection | `yazi-emulator` (`Brand`, `Emulator`, `Probe`, `Mux`) | Existing probes are the model for capability-based graphics, clipboard, keyboard, and mux support; do not assume an iOS terminal protocol |
 | Filesystem and paths | `yazi-fs` (`engine`, `path`, `file`, `cha`, `cwd`, `xdg`, `mounts`, `trash`) | Local POSIX-like APIs are likely reusable, but jailbreak path roots, sandbox restrictions, case folding, permissions, mounts, and trash are platform-sensitive |
-| File watcher | `yazi-watcher`, `notify` with `macos_fsevent` feature, `PollWatcher` fallback | FSEvents availability, sandbox access, jailbreak filesystem notifications, and polling behavior need a real-device decision |
+| File watcher | `yazi-watcher`, `notify` with `macos_fsevent` feature, `PollWatcher` fallback | iOS KqueueWatcher event coverage, sandbox access, jailbreak filesystem notifications, and polling behavior remain DEVICE-UNVERIFIED |
 | Task scheduler and file operations | `yazi-scheduler` (`file`, `process`, `fetch`, `preload`, `hook`, `size`, `plugin`) | Preserves asynchronous progress, cancellation, hooks, and external process semantics; shell spawning is a major iOS concern |
 | Process and shell integration | `yazi-scheduler/src/process`, `yazi-shared/src/shell`, `yazi-binding/src/process` | Uses `sh`, `cmd.exe`, libc process setup, inherited stdio, and background/orphan modes; capability adapter required rather than disabling the scheduler |
 | Image decoding and terminal graphics | `yazi-adapter`, drivers `kgp`, `kgp_old`, `iip`, `sixel`, `ueberzug`, `chafa` | Protocols should be selected by probes; external tools and local compositor support are optional |
@@ -160,9 +160,10 @@ The most important observations for later tasks are:
    volume discovery is not implemented.
 5. **Watcher backend.** `yazi-watcher` enables the `macos_fsevent` feature of
    `notify`, creates a `RecommendedWatcher`, and retains a polling alternative. The
-   source does not establish whether the FSEvents backend is usable in the target
-   sandbox or on a jailbroken device; initialization and runtime behavior must be
-   measured on-device.
+   locked notify 8.2.0 selects `KqueueWatcher` on iOS. macOS selects
+   `FsEventWatcher` unless `macos_kqueue` is enabled; `fsevent-sys` is macOS-only.
+   The feature does not make iOS FSEvents-backed. Initialization, event coverage,
+   and polling fallback remain DEVICE-UNVERIFIED.
 6. **Terminal and SSH.** `yazi-term` uses Unix termios, signal hooks, poll/select,
    Unix stream pairs, and `/dev/tty`; `yazi-tty` opens standard file descriptors or
    `/dev/tty`. These are the primary SSH and jailbroken-terminal seams. Task 007
@@ -550,3 +551,16 @@ build step is intentionally not marked `continue-on-error` and does not use
 Task 001 makes documentation and CI changes only. It does not add an iOS trash,
 watcher, clipboard, opener, process, FFI, or Lua implementation, and it does not
 rename upstream internals or remove features to manufacture a green build.
+
+### Task 011: Apple local-copy metadata
+
+Use explicit macOS/iOS cfgs for creation-time restoration through each platform's
+`FileTimesExt`; the trait and `set_created` have been stable since Rust 1.75.0.
+`Attrs` preserves optional source creation time without manufacturing a value.
+Rust's Apple `fs::copy` uses clone/copyfile optimizations on iOS as well as macOS.
+The existing Unix manual copy fallback is now enabled explicitly for iOS on
+`PermissionDenied`/`Unsupported`, preserving existing best-effort mode/timestamp
+restoration and propagation of source/destination/stream failures. Other platforms
+and metadata contracts are unchanged. See the source evidence and validation
+boundaries in [Task 011 parity notes](ios-feature-parity.md#task-011-local-copy-metadata).
+Physical storage semantics remain DEVICE-UNVERIFIED.
