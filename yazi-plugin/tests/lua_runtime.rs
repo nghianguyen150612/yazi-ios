@@ -283,6 +283,20 @@ async fn yazi_command_binding_missing_executable_is_nonfatal() {
 	assert!(!err.is_nil(), "missing executable must yield an error");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn zoxide_missing_executable_is_not_reported_as_empty_history() {
+	use mlua::Value;
+
+	let lua = slim_lua();
+	let source = preset("plugins/zoxide").replace("Command(\"zoxide\")", "Command(\"task017-no-zoxide\")");
+	let source = source.replace("return M", "return M.is_empty('.')");
+	let (empty, error): (Value, Value) = lua.load(source).eval_async().await.unwrap();
+	assert!(empty.is_nil(), "a missing executable must not look like an empty history");
+	let error = error.to_string().unwrap_or_default();
+	assert!(error.contains("Failed to start `zoxide`"), "unexpected error: {error:?}");
+}
+
 // --- Real Yazi cancellation (Scope) ---
 
 #[test]

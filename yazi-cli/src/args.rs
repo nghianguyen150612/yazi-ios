@@ -39,6 +39,15 @@ pub(super) enum Command {
 	Open(CommandOpen),
 	/// Print environment and configuration information.
 	Env,
+	/// Report external command capabilities.
+	Doctor(CommandDoctor),
+}
+
+#[derive(clap::Args)]
+pub(super) struct CommandDoctor {
+	/// Print a stable machine-readable report.
+	#[arg(long)]
+	pub(super) json: bool,
 }
 
 #[derive(clap::Args)]

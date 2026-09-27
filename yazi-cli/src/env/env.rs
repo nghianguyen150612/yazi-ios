@@ -1,22 +1,21 @@
-use std::{env, ffi::OsStr, fmt::Write, path::Path, process::Command};
+use std::{env, fmt::Write, path::Path, process::Command};
 
 use anyhow::Result;
-use regex::Regex;
 use yazi_adapter::drivers::{Drivers, kgp_shm_permitted};
 use yazi_config::{YAZI, build_flavor};
 use yazi_emulator::{Brand, Emulator, Mux};
 use yazi_fs::Xdg;
 use yazi_shared::timestamp_us;
-use yazi_shim::OptionExt;
 use yazi_term::TERM;
 
-use crate::env::Env;
+use crate::{capability::CapabilityReport, env::Env};
 
 impl Env {
 	pub(crate) async fn print() -> Result<String> {
 		let mut s = String::new();
 		let emulator = Emulator::probe().await?;
 		let theme = build_flavor(emulator.light().unwrap_or_default())?;
+		let capabilities = CapabilityReport::collect();
 
 		writeln!(s, "Yazi\n{}", Self::yazi_version())?;
 		writeln!(s, "    Backtrace: {:?}", env::var_os("RUST_BACKTRACE"))?;
@@ -114,35 +113,21 @@ impl Env {
 		)?;
 
 		writeln!(s, "\nMultiplexers")?;
-		writeln!(s, "    tmux version       : {}", Self::dep_version("tmux", "-V"))?;
+		writeln!(s, "    tmux version       : {}", capabilities.value("tmux"))?;
 		writeln!(s, "    tmux build flags   : enable-sixel={}", Mux::tmux_sixel_flag())?;
 		writeln!(s, "    ZELLIJ_SESSION_NAME: {:?}", env::var_os("ZELLIJ_SESSION_NAME"))?;
-		writeln!(s, "    Zellij version     : {}", Self::dep_version("zellij", "--version"))?;
+		writeln!(s, "    Zellij version     : {}", capabilities.value("zellij"))?;
 
 		writeln!(s, "\nDependencies")?;
-		#[rustfmt::skip]
-		writeln!(s, "    file          : {}", Self::dep_version(env::var_os("YAZI_FILE_ONE").unwrap_or("file".into()), "--version"))?;
-		writeln!(s, "    ueberzugpp    : {}", Self::dep_version("ueberzugpp", "--version"))?;
-		#[rustfmt::skip]
-		writeln!(s, "    ffmpeg/ffprobe: {} / {}", Self::dep_version("ffmpeg", "-version"), Self::dep_version("ffprobe", "-version"))?;
-		writeln!(s, "    pdftoppm      : {}", Self::dep_version("pdftoppm", "--help"))?;
-		writeln!(s, "    magick        : {}", Self::dep_version("magick", "--version"))?;
-		writeln!(s, "    fzf           : {}", Self::dep_version("fzf", "--version"))?;
-		#[rustfmt::skip]
-		writeln!(s, "    fd/fdfind     : {} / {}", Self::dep_version("fd", "--version"), Self::dep_version("fdfind", "--version"))?;
-		writeln!(s, "    rg            : {}", Self::dep_version("rg", "--version"))?;
-		writeln!(s, "    chafa         : {}", Self::dep_version("chafa", "--version"))?;
-		writeln!(s, "    zoxide        : {}", Self::dep_version("zoxide", "--version"))?;
-		#[rustfmt::skip]
-		writeln!(s, "    7zz/7z        : {} / {}", Self::dep_version("7zz", "i"), Self::dep_version("7z", "i"))?;
-		writeln!(s, "    resvg         : {}", Self::dep_version("resvg", "--version"))?;
-		writeln!(s, "    jq            : {}", Self::dep_version("jq", "--version"))?;
+		for line in capabilities.env_lines() {
+			writeln!(s, "    {line}")?;
+		}
 
 		writeln!(s, "\nClipboard")?;
-		#[rustfmt::skip]
-		writeln!(s, "    wl-copy/paste: {} / {}", Self::dep_version("wl-copy", "--version"), Self::dep_version("wl-paste", "--version"))?;
-		writeln!(s, "    xclip        : {}", Self::dep_version("xclip", "-version"))?;
-		writeln!(s, "    xsel         : {}", Self::dep_version("xsel", "--version"))?;
+		writeln!(s, "    wl-copy       : {}", capabilities.value("wl-copy"))?;
+		writeln!(s, "    wl-paste      : {}", capabilities.value("wl-paste"))?;
+		writeln!(s, "    xclip         : {}", capabilities.value("xclip"))?;
+		writeln!(s, "    xsel          : {}", capabilities.value("xsel"))?;
 
 		writeln!(s, "\nRoutine")?;
 		writeln!(s, "    `file -bL --mime-type`: {}", Self::file1_output())?;
@@ -170,29 +155,6 @@ impl Env {
 			Ok(s) if s.trim().is_empty() => format!("{} (whitespaces)", p.display()),
 			Ok(s) => format!("{} ({} chars)", p.display(), s.chars().count()),
 			Err(e) => format!("{} ({e})", p.display()),
-		}
-	}
-
-	fn dep_version(name: impl AsRef<OsStr>, arg: &str) -> String {
-		match Command::new(&name).arg(arg).output() {
-			Ok(out) if out.status.success() => {
-				let line =
-					String::from_utf8_lossy(&if out.stdout.is_empty() { out.stderr } else { out.stdout })
-						.trim()
-						.lines()
-						.next()
-						.unwrap_or_default()
-						.to_owned();
-
-				Regex::new(r"\d+\.\d+(\.\d+-\d+|\.\d+|\b)")
-					.unwrap()
-					.find(&line)
-					.map(|m| m.as_str())
-					.owned()
-					.unwrap_or(line)
-			}
-			Ok(out) => format!("{:?}, {:?}", out.status, String::from_utf8_lossy(&out.stderr)),
-			Err(e) => format!("{e}"),
 		}
 	}
 

@@ -23,7 +23,16 @@ end
 function M:entry()
 	local st = state()
 	if st.empty == nil then
-		st.empty = M.is_empty(st.cwd)
+		local empty, err = M.is_empty(st.cwd)
+		if empty == nil then
+			return ya.notify {
+				title = "Zoxide",
+				content = tostring(err),
+				timeout = 5,
+				level = "error",
+			}
+		end
+		st.empty = empty
 		set_state(st.empty)
 	end
 
@@ -87,16 +96,19 @@ function M.options()
 end
 
 ---@param cwd string
----@return boolean
+---@return boolean?, Error?
 function M.is_empty(cwd)
-	local child = Command("zoxide"):arg({ "query", "-l", "--exclude", cwd }):stdout(Command.PIPED):spawn()
+	local child, err = Command("zoxide")
+		:arg({ "query", "-l", "--exclude", cwd })
+		:stdout(Command.PIPED)
+		:spawn()
 	if not child then
-		return true
+		return nil, Err("Failed to start `zoxide`, error: %s", err)
 	end
 
 	local first = child:read_line()
 	child:start_kill()
-	return not first
+	return not first, nil
 end
 
 ---@param cwd string

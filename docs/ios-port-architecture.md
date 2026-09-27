@@ -725,3 +725,32 @@ Compile success is not runtime evidence. VM execution, preset loading,
 user plugins, async/cancellation, process/identity/HTTP behavior, and locale
 must be confirmed on a physical jailbroken device; see
 `docs/ios-device-test-plan-lua-runtime.md`.
+
+## Task 017 external capability boundary
+
+Task 017 makes the optional process boundary explicit rather than treating a
+desktop helper list as an iOS prerequisite. The authoritative matrix is
+[`docs/ios-external-dependencies.md`](ios-external-dependencies.md), and the
+physical validation rows are in
+[`docs/ios-device-test-plan-external-tools.md`](ios-device-test-plan-external-tools.md).
+
+`ya doctor` owns capability-oriented health reporting; `ya env` continues to
+own raw environment/configuration diagnostics and now reuses the same probe
+results for its helper/version section. Doctor performs no startup work for
+Yazi itself and returns success when optional tools are absent. A future
+strict policy is intentionally not added: no external executable was found to
+be a core startup requirement.
+
+Runtime lookup is layout-neutral. The shared resolver uses the process
+`PATH`, handles aliases and `YAZI_FILE_ONE`, avoids `which`/`command -v`/`where`,
+does not prepend `/var/jb` or any other guessed jailbreak directory, and keeps
+non-UTF-8 path handling at the OS boundary. Rootful/rootless PATH construction
+belongs to Task 018 installation, not this runtime layer.
+
+The capability contract preserves the prior port work: native iOS clipboard
+does not depend on Unix desktop clipboard helpers; iOS image preview does not
+require `ueberzugpp`; Chafa remains an optional terminal fallback; and the iOS
+`ya open` handoff does not depend on desktop openers. Search, preview, archive,
+package, session, and configured-opener helpers degrade only the feature that
+invokes them. The zoxide probe distinguishes a missing binary from an empty
+directory history without adding a launch-time probe.
