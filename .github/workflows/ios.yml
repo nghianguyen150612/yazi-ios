@@ -70,3 +70,19 @@ jobs:
           cargo build --locked --verbose --target aarch64-apple-ios \
             --package yazi-fm \
             --package yazi-cli
+
+      - name: Check Lua runtime crates for aarch64-apple-ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked --target aarch64-apple-ios \
+            -p yazi-shim \
+            -p yazi-binding \
+            -p yazi-runner \
+            -p yazi-plugin
+          # Test-code compile coverage only; this proves the test harness
+          # builds for the target, not that tests ran on iOS.
+          cargo check --locked --tests --target aarch64-apple-ios \
+            -p yazi-binding \
+            -p yazi-runner \
+            -p yazi-plugin

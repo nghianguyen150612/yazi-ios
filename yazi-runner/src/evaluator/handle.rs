@@ -16,6 +16,13 @@ impl EvaluateHandle {
 	}
 }
 
+#[cfg(test)]
+impl EvaluateHandle {
+	pub(crate) async fn join(&mut self) -> Result<(), tokio::task::JoinError> {
+		(&mut self.handle).await
+	}
+}
+
 impl Drop for EvaluateHandle {
 	fn drop(&mut self) { self.abort(); }
 }
