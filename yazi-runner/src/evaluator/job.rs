@@ -21,7 +21,12 @@ impl EvaluateJob {
 			let lua = runner.spawn_with(&scope, &name)?;
 
 			let scope_ = scope.clone();
-			lua.set_hook(
+			// NB: the chunk below runs via `call_async`, which executes on a
+			// fresh coroutine thread created by mlua — not on the main thread.
+			// A per-thread `set_hook` would therefore never observe it. The
+			// global hook is inherited by every thread mlua creates after this
+			// call, so cancellation reaches the running body.
+			lua.set_global_hook(
 				HookTriggers::new().on_calls().on_returns().every_nth_instruction(2000),
 				move |_, _| {
 					if scope_.is_cancelled() {

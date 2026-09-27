@@ -675,3 +675,53 @@ jailbreak terminal, what a PC-side terminal reports over SSH, tmux
 passthrough, Chafa presence/absence, and SHM success/denial must be
 confirmed on a physical device before any supported claim is made; see
 `docs/ios-device-test-plan-terminal-graphics.md`.
+
+## Task 016 Lua runtime policy
+
+Task 016 turns the anticipated Lua/platform adapter into a concrete backend,
+initialization, asset, and binding policy. It is recorded here as the rule
+for this seam because previewers, fetchers, `ya env`, and later
+dependency-matrix work all run inside this runtime.
+
+**Backend.** Vendored Lua 5.5 interpreter via `mlua 0.12.1` (`lua55` +
+`vendored`); `mlua-sys` builds `lua-src 551.0.2` C sources for the target.
+No LuaJIT, no JIT codegen, no executable-memory requirement. Never infer the
+backend from `Cargo.lock` alone; use the resolved feature graph.
+
+**Initialization.** `yazi-fm` owns the order: shim → shared → tty →
+emulator → fs → vfs → `yazi_runner::init(slim_lua)` → adapter/widgets/
+watcher/actor/fm; then config → boot → DDS → `yazi_plugin::setup`
+(standard Lua) → app. Runner workers always spawn fresh Lua states with the
+slim setter; the global `LUA` is for the standard runtime only. No module
+may initialize another module as a side effect; tests initialize globals
+explicitly (`yazi_shim::init_tests`, `OnceLock`-guarded runner init).
+
+**Assets.** Preset TOML/Lua are compile-time assets. Desktop debug reads
+them from the source tree; iOS debug embeds them like release so a copied
+device binary is self-contained; release always embeds. The gate lives in
+`yazi-macro/src/asset.rs` and covers `config_preset!`, `plugin_preset!`,
+and `theme_preset!` together — config setup precedes plugin setup, so fixing
+only one family would still leave a device boot gap.
+
+**Loader.** Built-in plugins are cache seeds; user plugins resolve under the
+Task 014 XDG config dir (`plugins/{plugin}.yazi/{entry}.lua`) with no
+iOS-only search path and no hard-coded jailbreak literals. Tests use a
+`ensure_in(root)` seam with an isolated temp root; production still uses
+`Xdg::config_dir()`. Text chunks promote to in-memory bytecode on first
+execution; nothing persists across processes. `require` balances every
+`enter` with `leave`, including on load/call failure; no additional guard is
+warranted.
+
+**Bindings.** `Command` keeps the Unix implementation on iOS (Task 008
+`fork`+`exec` + `sh -c` + `setsid` policy unchanged); `:memory()` enforces
+via `setrlimit(RLIMIT_AS)`, while `ya.proc_info` polls resident memory via
+public `proc_pidinfo` on macOS+iOS (failure or partial result yields `{}`,
+complete `proc_taskinfo` yields `{ mem_resident }`) and returns `{}` elsewhere. Identity and
+target APIs are thin Unix/const plumbing. HTTP/UDS compile through existing
+abstractions with no iOS reduction. Optional external CLIs are capabilities,
+never VM-init gates; their matrix belongs to Task 017.
+
+Compile success is not runtime evidence. VM execution, preset loading,
+user plugins, async/cancellation, process/identity/HTTP behavior, and locale
+must be confirmed on a physical jailbroken device; see
+`docs/ios-device-test-plan-lua-runtime.md`.

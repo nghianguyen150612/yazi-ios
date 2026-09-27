@@ -426,10 +426,10 @@ made that a jailbroken device launches an app; see
 | SVG preview | SVG rendering/preview is plugin/tool based | External capability | Detect renderer and fall back to text/metadata | `resvg` or equivalent | Yes | TBD |
 | MIME detection and file typing | MIME rules select previewers/openers; `file` is commonly used for detection | External capability | Treat MIME detection as a replaceable capability and preserve configured rules | `file` or platform MIME API | Yes | TBD |
 | Fetcher, preloader, and spotter plugins | Lua extensions can fetch, preload, and spot file data asynchronously | Portable (source-level); native helper paths need validation | Preserve runner and scheduler APIs; isolate process/filesystem calls | Lua runtime; optional helpers | Yes | TBD |
-| Lua runtime | Vendored Lua is enabled by default and powers UI, configuration, preview, and plugins | Expected platform adapter; native Lua build is unvalidated | Keep full Lua feature set and fix target/toolchain issues rather than removing it | `mlua` with vendored Lua; C compiler/SDK | Yes | TBD |
-| Lua filesystem and process APIs | Plugins can read/write files, spawn processes, use URLs, and access runtime state | Expected platform adapter | Preserve API surface and return capability-aware errors | Lua; shell/process provider | Yes | TBD |
-| UI plugin components | Upstream preset components compose the app, tabs, rails, preview, status, tasks, and modals | Portable (source-level) | Keep component presets and full custom UI support | Lua; terminal renderer | Yes | TBD |
-| User `init.lua` and custom plugins | User initialization and installed plugins extend the UI and behavior | Portable (source-level); package/runtime paths unvalidated | Preserve config discovery and plugin loading on iOS paths | Lua; optional Git/package manager | Yes | TBD |
+| Lua runtime | Vendored Lua is enabled by default and powers UI, configuration, preview, and plugins | Task 016: Lua 5.5 vendored interpreter SOURCE-VERIFIED, host runtime HOST-RUNTIME-VALIDATED, iOS link COMPILE-VALIDATED, device DEVICE-UNVERIFIED | Keep full Lua feature set and fix target/toolchain issues rather than removing it | `mlua` with vendored Lua; C compiler/SDK | Yes | 016 |
+| Lua filesystem and process APIs | Plugins can read/write files, spawn processes, use URLs, and access runtime state | Task 016: Unix Command binding + identity/target APIs audited; host semantics HOST-RUNTIME-VALIDATED, iOS COMPILE-VALIDATED / DEVICE-UNVERIFIED; `proc_info` iOS adapter via public libproc | Preserve API surface and return capability-aware errors | Lua; shell/process provider | Yes | 016 |
+| UI plugin components | Upstream preset components compose the app, tabs, rails, preview, status, tasks, and modals | Task 016: preset assets self-contained on iOS debug via embedded include; HOST-RUNTIME-VALIDATED, DEVICE-UNVERIFIED | Keep component presets and full custom UI support | Lua; terminal renderer | Yes | 016 |
+| User `init.lua` and custom plugins | User initialization and installed plugins extend the UI and behavior | Task 016: user-plugin loader audited on Task 014 XDG paths; no iOS-only search path; HOST-RUNTIME-VALIDATED, DEVICE-UNVERIFIED | Preserve config discovery and plugin loading on iOS paths | Lua; optional Git/package manager | Yes | 016 |
 | VFS abstraction | Local, SFTP, Lua, and custom providers share file operations and URL semantics | Expected platform adapter | Keep `yazi-vfs` engine/provider contract and adapt path/auth capabilities | Provider-specific runtime | Yes | TBD |
 | SFTP client | `yazi-sftp` implements SFTP sessions, files, directories, links, metadata, and transfers | Portable (source-level), with real SSH validation pending | Preserve client and make authentication/network errors actionable | Network; OpenSSH key/password/agent configuration | Yes | TBD |
 | SSH authentication agent | Unix SFTP authentication can use a Unix-domain agent socket | Expected platform adapter | Validate SSH agent availability and provide key/password fallbacks | SSH agent; OpenSSH-compatible keys | Yes | TBD |
@@ -883,3 +883,209 @@ behavior all await the device. See [the Task 015 terminal-graphics device
 test plan](ios-device-test-plan-terminal-graphics.md).
 
 **COMPILE-VALIDATED / DEVICE-UNVERIFIED.**
+
+## Task 016 evidence: Lua/plugin runtime parity
+
+**Lua build graph (SOURCE-VERIFIED).** Workspace `mlua 0.12.1` with features
+`anyhow, async, error-send, lua55, macros, serde`; `yazi-plugin`,
+`yazi-runner`, `yazi-binding`, `yazi-shim` each expose
+`default = ["vendored-lua"]` → `vendored-lua = ["mlua/vendored"]`.
+`cargo tree -p yazi-plugin -e features` resolves
+`mlua v0.12.1 [anyhow,async,error-send,lua55,macros,mlua_derive,serde,vendored]`
+→ `mlua-sys v0.12.0` → `lua-src v551.0.2` (Lua 5.5). `luajit-src` appears in
+`Cargo.lock` (210.7.3) because `mlua-sys` declares `vendored = ["lua-src",
+"luajit-src"]`, but `build/find_vendored.rs` selects
+`lua_src::Build::new().build(lua_src::Lua55)` under `#[cfg(feature =
+"lua55")]` and the `luajit-src` branch is `#[cfg(feature = "luajit")]`-gated
+off. The active backend is the Lua 5.5 interpreter; no LuaJIT, JIT codegen,
+W^X exception, MAP_JIT, or executable-heap dependency is introduced. Do not
+infer the backend from `Cargo.lock` alone.
+
+**Vendored C build (COMPILE-VALIDATED).** With `vendored`, `mlua-sys` compiles
+the C sources from `lua-src` via `cc` for the requested target, propagating
+the iOS SDK/sysroot, `aarch64` arch, and libc linkage from the normal
+`cargo --target aarch64-apple-ios` invocation. No host Lua, no `pkg-config`
+system Lua, and no Yazi-added `dlopen` are involved. The existing
+`yazi-fm`/`yazi-cli` device-target link proves the C objects link; it does
+not prove Lua executed on a device (DEVICE-UNVERIFIED).
+
+**Initialization order (SOURCE-VERIFIED).** `yazi-fm/src/main.rs`:
+`yazi_shim::init()` → `yazi_shared::init()` → `yazi_tty::init()` →
+`yazi_emulator::init()` → `yazi_fs::init()` → `yazi_vfs::init()` →
+`yazi_runner::init(yazi_plugin::slim_lua)` → adapter/widgets/watcher/actor/fm
+init. `serve()`: logs/signals → `yazi_term::setup` → emulator setup →
+`yazi_config::setup` → `yazi_boot::setup` → `yazi_dds::serve` →
+`yazi_plugin::setup` → app serve. `yazi_plugin::setup()` inits the global
+`LUA` RoCell from `standard_lua()` (`Lua::new` → `stage_1` → `stage_2`).
+`Runner::spawn` creates a fresh `Lua::new` per worker, sets
+`Runtime::new(name, scope)`, and applies the `slim_lua` setter; it never
+reuses the global `LUA`. Globals that must precede use: `VFS` before
+`slim_lua`/`standard_lua` (`vf` global), `LOADER` before any `require`
+(`yazi_runner::init`), `RUNNER` before plugin jobs, `LOCAL_SET`/event pool
+before async plugin dispatch. The Task 015 `ya env` lesson is retained:
+`Drivers.candidates` never dereferences the `EMULATOR` RoCell outside
+`yazi-fm`, and tests init `yazi_shim` (Uzers cache) explicitly because
+`Loader::ensure` reaches `Xdg::config_dir()` → passwd home.
+
+**Standard vs slim runtime (SOURCE-VERIFIED, HOST-RUNTIME-VALIDATED).**
+`stage_1` installs `ui, ya, fs, vf, ps, rt, km, th`, filesystem `Error`,
+`Cha`, `Command`/process, `File`, `Url`, `Path`, custom `require` loader,
+preset `ya.lua`, and UI components; `stage_2` runs `setup.lua`,
+`compat.lua`, then optional `init.lua` under `runtime_scope!(lua, "init",
+...)`. `slim_lua` installs the worker subset (`ui, ya(isolate=true), fs,
+vf, rt, km, th, Cha, File, Url, Path, Error, Command, require, ya.lua`) with
+no dependency on standard-Lua global state. Host tests execute real vendored
+Lua: basic expression, full stdlib presence (`package, coroutine, string,
+table, math, utf8, os, io`), preset `ya.lua` with stubbed `ya`/`Error`
+(defines `clamp`, `readable_size`), `setup`/`compat` syntax validity,
+`os.setlocale("")` presence (jailbreak locale DEVICE-UNVERIFIED, nil return
+is nonfatal), representative `Command` host semantics, `target_os`/`family`
+plumbing, and error propagation without aborts.
+
+**iOS debug asset gap — fixed narrowly (SOURCE-VERIFIED,
+HOST-RUNTIME-VALIDATED, COMPILE-VALIDATED).** `yazi-macro/src/asset.rs`
+previously used `#[cfg(debug_assertions)]` → `fs::read(CARGO_MANIFEST_DIR…)`
+at runtime for `config_preset!`, `plugin_preset!`, `theme_preset!`. A debug
+`aarch64-apple-ios` binary copied to a jailbroken device has no build-machine
+source tree, so config setup (before plugin setup) and plugin/theme loads
+would fail. Fixed to `#[cfg(all(debug_assertions,
+not(target_os = "ios")))]` for source-tree reads and
+`#[cfg(any(not(debug_assertions), target_os = "ios"))]` for
+`include_bytes!`/`include_str!` embedding. Desktop debug reload behavior,
+all release behavior, Windows/Linux/macOS runtimes, and user plugin path
+semantics are unchanged. Regression guard:
+`yazi-plugin/tests/lua_runtime.rs::required_preset_assets_exist_for_self_containment`
+asserts required presets exist and the iOS cfg gate is present; iOS
+`cargo check` proves the embedded branch compiles for the target.
+
+**Loader / require (SOURCE-VERIFIED, HOST-RUNTIME-VALIDATED).** Built-in
+presets are registered in `Loader::default` from `plugin_preset!`; `Chunk`
+starts as `Text` with `@since`/`@sync` header analysis; first execution dumps
+via `Function::dump` to an in-memory `Binary` chunk in the same
+`RwLock<HashMap>` cache — never persisted across processes. `require` is an
+async function: `LOADER.ensure` (compat check + user-plugin file load from
+`Xdg::config_dir()/plugins/{plugin}.yazi/{entry}.lua`) → `enter_nested` →
+`LOADER.load` (`package.loaded` check, `load_new` with bytecode promotion) →
+`leave` → metatable wrapper; per-call wrappers re-enter/leave around
+`call_async_function`. Relative `.main`/`.rel` names resolve via the current
+runtime frame's module. Host tests cover built-in presence, cached second
+load via `package.loaded`, relative-name module logic (source-verified),
+invalid kebab names, missing plugin (error, not panic), incompatible
+`@since`, syntax/runtime errors, non-UTF8 bytes (no analyzer panic), and
+spaces/Unicode path joining verbatim. No `/var/mobile`, `/var/jb`, `/root`
+literal; no iOS-only search path.
+
+**Async / coroutines / cancellation (SOURCE-VERIFIED,
+HOST-RUNTIME-VALIDATED).** Workers use `tokio::task::spawn_blocking` +
+`Handle::current().block_on` + `call_async` + mlua threads/coroutines +
+`CancellationToken` + instruction hooks; `ya.async` runs under
+`LOCAL_SET.spawn_local` with `select! { cancelled => default, result =>
+call }`. The blocking-evaluate cancellation hook is installed as the mlua
+global hook so the coroutine thread `call_async` creates inherits it (a
+main-thread-only hook would never observe the running body). The model is unchanged for iOS; Lua stays on mlua-permitted
+threads under its `Send` contract. Host tests prove async completion,
+coroutine yield/resume, cancellation winning without panic, and error
+crossing worker boundaries.
+
+**Runtime frame integrity (SOURCE-VERIFIED, HOST-RUNTIME-VALIDATED).**
+`require.rs` (`enter` → await load → `leave` → propagate), `runtime_scope!`
+(`enter` → block → `leave`), and `sync.rs` async (`enter` → `select!` →
+`leave`) are all balanced on error paths; audit found no enter-without-leave
+path, so no RAII guard was invented. `yazi-binding/tests/runtime_frame.rs`
+pins name/module, nested inherit/restore, blocking flag, underflow error, a
+manual enter/leave pairing reference (explicitly NOT a require test), child
+scope, `init`-excluded block storage, and real `Scope` cancel semantics.
+Real nested-require balance is proven by the yazi-runner
+`real_nested_require_*` tests below, not by the manual pairing test.
+
+**Bindings (SOURCE-VERIFIED, HOST-RUNTIME-VALIDATED / COMPILE-VALIDATED).**
+`Command`: Unix `spawn` with `pre_exec(setrlimit(RLIMIT_AS))` when
+`:memory()` is set; `arg/cwd/env/stdin/stdout/stderr/spawn/status/output`
+audited; iOS selects the Unix impl (`#[cfg(unix)]`); host tests execute real
+Lua `Command("sh"):arg(...):output()` through the actual slim runtime and
+prove success, arg/cwd/env, stdout/stderr capture, nonzero exit, and missing
+executable `(nil, err)` without panic (Unix shell cases are `#[cfg(unix)]`;
+Windows asserts only binding existence). `ya.proc_info`: see below. Identity
+(`uid/gid/user_name/group_name/host_name`) routes through the Task 002
+`yazi_shim::Uzers` layer (`#[cfg(unix)]`); host callability tested, iOS
+values DEVICE-UNVERIFIED. `target_os`/`target_family` return
+`std::env::consts::{OS,FAMILY}` verbatim → `("ios","unix")` on the iOS
+target by Rust target definition; host tests compare against the host consts
+and never hard-code `"unix"`. Stdlib is untouched; `os.setlocale("")`
+availability is compile-verified, behavior DEVICE-UNVERIFIED. HTTP
+(`yazi-plugin/src/utils/http.rs` + `yazi-binding/src/http`) and UDS
+(`yazi-shim` abstraction) compile for iOS with no source defect found;
+COMPILE-VALIDATED / DEVICE-UNVERIFIED, no feature reduction.
+
+**`ya.proc_info` iOS gap — resolved as compile-safe adapter
+(SOURCE-VERIFIED, COMPILE-VALIDATED, DEVICE-UNVERIFIED).** Previously
+`#[cfg(target_os = "macos")]` returned `mem_resident` via
+`libc::proc_pidinfo(PROC_PIDTASKINFO)` and every other target returned `{}`.
+`libc 0.2.189` declares `proc_pidinfo`, `PROC_PIDTASKINFO`, and
+`proc_taskinfo` in `unix/bsd/apple/mod.rs` whose header covers
+`*-apple-*` with no `target_os` gate on these items, so the symbols are
+available to `aarch64-apple-ios` via libSystem — a public BSD API, not a
+private framework. Task 016 widens the cfg to
+`any(target_os = "macos", target_os = "ios")` with the identical mapping,
+keeping the fallback for all other targets. The return mapping is explicit
+and nonfatal: `proc_pidinfo` returning fewer bytes than
+`size_of::<libc::proc_taskinfo>()` (failure or partial/short result) yields
+`{}` (no `mem_resident` key), so `ya.proc_info(id).mem_resident` is nil and
+`svg.lua`'s `if mem and mem > alloc` guard treats it as unmeasured rather
+than as a zero-byte resident set. On success with a complete `proc_taskinfo`
+the mapping is `{ mem_resident = <bytes> }`. This is distinct from
+`Command:memory()`, which enforces via `setrlimit(RLIMIT_AS)` before exec.
+Linking is proven by the iOS CI build; child-inspection permissions and
+sandbox behavior on a jailbroken device stay DEVICE-UNVERIFIED.
+
+**Built-in startup / external CLI boundary (SOURCE-VERIFIED).** `setup.lua`
+requires `dds`, `extract`, `trash` `:setup()`; their setup phases do not
+require optional helpers to boot — helpers (`fd, rg, fzf, zoxide, ffmpeg,
+ffprobe, jq, 7zz, pdftoppm, magick, file, resvg`) are invoked only when the
+feature is used. Missing helpers must not break VM init; the full
+availability matrix belongs to Task 017 and is not implemented here.
+
+**Error contract (HOST-RUNTIME-VALIDATED).** Syntax, runtime, Rust-binding,
+missing-plugin, missing-executable, nested-require, async, and cancelled
+cases all surface as Lua/Rust errors with plugin/entry context; the host
+never aborts. Preserved context: plugin name, entry/module, underlying
+error; nothing is swallowed.
+
+**No-JIT (SOURCE-VERIFIED).** Resolved features select Lua 5.5; no
+LuaJIT/JIT/W^X/MAP_JIT/executable-heap requirement is added or implied.
+`luajit-src` in the lockfile is an unselected optional build-dep.
+
+**CI / simulator.** `ios.yml` keeps the `yazi-fm`/`yazi-cli` device-target
+link build and adds `cargo check --target aarch64-apple-ios` for
+`yazi-shim/binding/runner/plugin` plus `cargo check --tests` for test-code
+compile coverage (explicitly not a run claim). No simulator runtime test was
+added: the GitHub macOS runner cannot provide jailbreak
+filesystem/process/PTY behavior, so a simulator pass would not be device
+evidence.
+
+**Tests (HOST-RUNTIME-VALIDATED).** 56 new host tests, all passing:
+`yazi-binding/tests/runtime_frame.rs` (10: frames, nesting, blocking,
+underflow, manual pairing reference, child scope, blocks, real Scope
+cancel);
+`yazi-runner` lib unit tests (13: real `require` builtin/cache, nested
+success, relative success, nested-failure frame restoration, missing-module
+context, user-file normal/spaces/Unicode/nested-entry/missing/syntax via the
+`ensure_in` test seam with production `Xdg::config_dir()` unchanged) plus
+`yazi-runner/tests/loader_parity.rs` (12: compat, sync flags, invalid
+names, missing plugin, built-in cache, `package.loaded` second load,
+syntax/runtime errors, non-UTF8);
+`yazi-plugin/tests/lua_runtime.rs` (21: 8 raw-mlua references labeled `raw_*`
+plus real Yazi slim-runtime binding install, real `ya.target_os/family` via
+the Yazi binding, real Lua `Command` cases on Unix with portable existence
+check on Windows, real `Scope` cancel, `ya.lua` source, `setup`/`compat`
+syntax-only, bytecode reference, identity on Unix, assets + iOS-gate
+assertion).
+Raw mlua tests are never presented as Runner integration; `setup`/`compat`
+are explicitly syntax-only. Unix shell cases are `#[cfg(unix)]`; no test
+hard-codes `FAMILY == "unix"`, `sh`, or `/tmp` on Windows.
+Global-RoCell tests use `Once`/`OnceLock` lifecycles (shared
+`crate::init_tests` in yazi-runner); no order dependence.
+
+**Status: HOST-RUNTIME-VALIDATED + COMPILE-VALIDATED / DEVICE-UNVERIFIED.**
+No physical jailbroken-device execution is claimed; see
+`docs/ios-device-test-plan-lua-runtime.md` (all 50 rows UNVERIFIED).
