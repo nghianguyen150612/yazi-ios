@@ -6,12 +6,12 @@ use base64::{Engine, engine::general_purpose};
 use image::DynamicImage;
 use ratatui_core::{layout::Rect, style::Color};
 use yazi_config::THEME;
-use yazi_emulator::{CLOSE, EMULATOR, ESCAPE, Emulator, START};
+use yazi_emulator::{CLOSE, ESCAPE, Emulator, START};
 use yazi_ffi::shm::NamedSharedMemory;
 use yazi_tty::sequence::{MoveTo, ResetAttrs, SetBg, SetFg};
 
 use super::KgpPayload;
-use crate::{ADAPTOR, drivers::kgp_id, image::Image};
+use crate::{ADAPTOR, drivers::{kgp_id, kgp_shm_allowed}, image::Image};
 
 static DIACRITICS: [char; 297] = [
 	'\u{0305}',
@@ -355,8 +355,8 @@ impl Kgp {
 		}
 
 		fn output_shm(raw: &[u8], format: u8, (w, h): (u32, u32)) -> Result<KgpPayload> {
-			if !EMULATOR.kgp_shm.get() {
-				bail!("Shared memory is not supported by the terminal")
+			if !kgp_shm_allowed() {
+				bail!("Shared memory transport is unavailable for this terminal")
 			}
 
 			let mut pl = KgpPayload::with(200, NamedSharedMemory::new(raw)?);

@@ -2,7 +2,7 @@ use std::{env, ffi::OsStr, fmt::Write, path::Path, process::Command};
 
 use anyhow::Result;
 use regex::Regex;
-use yazi_adapter::drivers::Drivers;
+use yazi_adapter::drivers::{Drivers, kgp_shm_permitted};
 use yazi_config::{YAZI, build_flavor};
 use yazi_emulator::{Brand, Emulator, Mux};
 use yazi_fs::Xdg;
@@ -40,7 +40,33 @@ impl Env {
 		writeln!(s, "    Emulator.probe      : {emulator:?}")?;
 
 		writeln!(s, "\nAdapter")?;
-		writeln!(s, "    Drivers.matches: {:?}", Drivers::matches(&emulator))?;
+		writeln!(s, "    Drivers.matches   : {:?}", Drivers::matches(&emulator))?;
+		writeln!(s, "    Drivers.candidates: {:?}", Drivers::candidates(&emulator))?;
+		writeln!(
+			s,
+			"    Drivers.helpers   : {:?}",
+			Drivers::candidates(&emulator)
+				.iter()
+				.map(|d| match d.helper() {
+					Some(h) => format!("{d} (helper: {h})"),
+					None => d.to_string(),
+				})
+				.collect::<Vec<_>>(),
+		)?;
+		// NOTE: this diagnostic must stay a pure function of the local probe
+		// above. The `Command::Env` path never calls `yazi_emulator::init()`
+		// (only `yazi-fm` does), so nothing here may dereference the global
+		// `EMULATOR` RoCell; in debug builds that asserts, in release it is
+		// uninitialized memory.
+		let in_ssh = yazi_shared::in_ssh_connection();
+		writeln!(
+			s,
+			"    Kgp SHM           : reported={}, ssh={}, permitted={}",
+			emulator.kgp_shm.get(),
+			in_ssh,
+			kgp_shm_permitted(emulator.kgp_shm.get(), in_ssh),
+		)?;
+		writeln!(s, "    chafa available   : {}", yazi_adapter::drivers::chafa_available())?;
 		writeln!(s, "    TERM.dimension : {:?}", TERM.dimension())?;
 
 		writeln!(s, "\nDesktop")?;

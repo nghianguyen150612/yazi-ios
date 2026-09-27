@@ -9,7 +9,30 @@ function M:peek(job)
 	ya.sleep(math.max(0, rt.preview.image_delay / 1000 + start - os.clock()))
 
 	local _, err = ya.image_show(url, job.area)
-	ya.preview_widget(job, err)
+	if not err then
+		return ya.preview_widget(job, nil)
+	end
+
+	-- No usable graphics renderer (no protocol, missing helper, …):
+	-- fall back to Yazi's own image metadata instead of only a
+	-- renderer-spawn error. This path uses `ya.image_info` alone, so it
+	-- never depends on chafa, file, magick, ffmpeg, or jq.
+	local info, info_err = ya.image_info(url)
+	if not info then
+		-- The image itself cannot be decoded; the real decode diagnostic
+		-- wins over the renderer/helper error above.
+		return ya.preview_widget(job, info_err or err)
+	end
+
+	local text = ui.Text.parse(string.format(
+		"----- Image Info -----\n\n  Format: %s\n  Size:   %dx%d\n  Color:  %s\n\nNo terminal image renderer available: %s",
+		tostring(info.format),
+		info.w,
+		info.h,
+		tostring(info.color),
+		tostring(err)
+	))
+	ya.preview_widget(job, text:area(job.area):wrap(ui.Wrap.YES))
 end
 
 function M:seek() end

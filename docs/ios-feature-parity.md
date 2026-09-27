@@ -777,3 +777,109 @@ isolation, rootful/rootless layouts, long-path fallback binding, or failure
 diagnostics. See [the Task 014 runtime-path device test plan](ios-device-test-plan-runtime-paths.md).
 
 **COMPILE-VALIDATED / DEVICE-UNVERIFIED.**
+
+## Task 015 evidence: terminal graphics fallback
+
+**Terminal capability audit (SOURCE-VERIFIED).** `Brand::from_env()` in
+`yazi-emulator/src/brand.rs` is purely heuristic (`TERM`, `TERM_PROGRAM`,
+and presence of session env vars); `Brand::from_csi()` parses the active
+`RequestXtVersion` (`CSI > q`) reply. `Emulator::request()` actively queries
+color scheme, background color, cursor blink/style, XT version, Kitty
+graphics (`RequestKgp`, id 278941603, answered `OK` via the APC `i=` reply
+parsed in `yazi-term/src/parser/report.rs`), Kitty SHM (`RequestKgpShm`,
+id 916472805, only sent when a local SHM object could actually be created),
+DA1 (`RequestDA1`, Sixel confirmed by attribute 4 in `Emulator::apply`),
+cell pixel size (`CSI 16 t`), clipboard (`OSC 5522`), and CSI-u. IIP
+(iTerm2/WezTerm inline images) has **no active query** and stays
+identity-driven: that asymmetry is now documented on the selection function
+rather than hidden. `Emulator::probe()` re-requests through tmux
+passthrough when the brand is `Tmux` (`Mux::tmux_setup()` shells out to
+`tmux` with a 5-second bound; a missing `tmux` stays nonfatal), and
+`Emulator::restart()` preserves the mux sixel flag while clearing brand,
+version, KGP, KGP-SHM, and Sixel for the second probe. `in_ssh_connection()`
+(`SSH_CLIENT`/`SSH_TTY`/`SSH_CONNECTION`) is consulted for clipboard and
+SHM-transport policy only; it is never used to disable image protocols.
+
+**Driver gaps fixed.** `Driver::needs_ueberzug()` was `not
+Kgp/KgpOld/Iip/Sixel`, so selecting `Chafa` called
+`Ueberzug::start(Chafa)` and attempted to spawn `ueberzugpp` even though
+`Chafa::image_show()` spawns `chafa` directly. It is now exactly
+`X11 | Wayland`, with a regression test. `Drivers::matches()` collapsed the
+`Drivers(Vec<Driver>)` list to one `Driver` behind a `OnceLock`, so a
+missing helper could never fall through and the compositor fallback
+(`XDG_SESSION_TYPE`, `WAYLAND_DISPLAY`, `DISPLAY`, compositor sockets) ran
+even on iOS. Selection is now the pure `Drivers::candidates_for()` chain
+over an injected `ProbeState` plus `DesktopEnv`: the evidenced native
+protocols in the verified brand order (known Kitty brands → modern `Kgp`,
+unknown KGP-only → legacy `KgpOld`, DA1-confirmed Sixel, identity-led `Iip`
+ahead of Sixel, tmux passthrough restrictions preserved), or — only when no
+native candidate exists — the platform tail (`Chafa` directly on iOS, the
+unchanged X11/Wayland/Chafa compositor logic elsewhere). `Adapter` falls
+through helper-backed failures (missing `chafa`, unstarted daemon:
+observably pre-commit) and surfaces terminal-protocol failures immediately
+(a silently ignored sequence has no acknowledgement to retry on; retrying
+after partial output is refused), preserves `shown` tracking across every
+failure so later `image_hide()`/cleanup still targets the right area, and
+caches the successful driver only where it is still offered.
+`Ueberzug::start()` is idempotent
+(first daemon binding wins) so retries never double-initialize the channel.
+
+**KGP/SHM audit (SOURCE-VERIFIED, DEVICE-UNVERIFIED).** `libc` declares
+`shm_open` for Apple targets and `rustix` reaches it through its libc
+backend with an Apple `mode_t` adjustment, so the `cfg(unix)` SHM module
+compiles for `aarch64-apple-ios`; `mmap`/`ftruncate`/`OwnedFd` naming
+(`/yazi-` prefix, slash-led, no interior slashes) is unchanged. Runtime
+availability on a jailbroken device is unproven and is not required: every
+KGP encode keeps its `output_shm().or_else(output_b64)` fallback, and the
+new `kgp_shm_allowed()` gate additionally forces base64 over SSH. The SSH
+rule is protocol evidence, not branding: the Kitty graphics specification
+("The transmission medium") defines `t=s` as a POSIX SHM object the
+terminal opens itself and states that remote clients unable to share
+filesystem/shared memory "must send the pixel data directly", so an
+iOS-created SHM object can never serve a PC-side terminal. KGP itself is
+never disabled by this rule.
+
+**Metadata fallback.** `yazi-plugin/preset/plugins/image.lua` `peek()` now
+keeps the exact success behavior (`preview_widget(job, nil)`), and on
+render failure asks `ya.image_info()` — Yazi's own `image`-crate metadata
+path, independent of `chafa`/`file`/`magick`/`ffmpeg`/`jq` — rendering
+Format/Dimensions/Color plus the renderer-unavailable reason as a wrapped
+`ui.Text` inside the preview area. When the image itself is undecodable,
+`image_info` returns nil plus the real decode error, and that error takes
+precedence (`info_err or err`): a malformed file reports its decode
+diagnostic, never the renderer/helper failure.
+
+**`ya env` diagnostics.** The `Adapter` section now prints the full
+`Drivers.candidates` chain, per-candidate helpers, KGP SHM
+reported/ssh/permitted state, and best-effort `chafa` `PATH` availability.
+The SHM line is a pure function of the local probe
+(`kgp_shm_permitted(emulator.kgp_shm.get(), in_ssh)`): the `Command::Env`
+path never calls `yazi_emulator::init()` (only `yazi-fm` does), so no
+diagnostic may dereference the global `EMULATOR` RoCell. It remains
+diagnostic-only, never a startup gate.
+
+Host validation passed: `cargo check` for `yazi-emulator`, `yazi-ffi`,
+`yazi-adapter`, `yazi-plugin`, `yazi-binding`, `yazi-cli`, and `yazi-fm`;
+`cargo test -p yazi-adapter` (16 tests: 11 selection, 4
+Chafa/ueberzug/helper/failover/SHM classification, 1 adapter shown-state
+regression proving a failed render preserves prior cleanup tracking),
+`cargo test -p yazi-binding` (image-info format/dimension/color plus
+malformed-image error), `cargo test -p yazi-plugin --test image_fallback`
+(3 tests executing the real preset `image.lua` against stubbed globals:
+success clears, valid image renders metadata, malformed image keeps the
+decode error); `yazi-emulator` and `yazi-ffi` report no tests honestly.
+`cargo metadata --locked --no-deps` and `git diff --check` pass; `luac -p`
+accepts the Lua fallback. Nightly `rustfmt` and `stylua` remain UNAVAILABLE
+/ PRE-EXISTING TOOLCHAIN MISMATCH; formatting follows nearby code and no
+unrelated files were reformatted. A host `ya env` run is attempted where
+feasible (see correction report); local `aarch64-apple-ios` checks are
+environment-gated and the exact-commit **iOS Baseline** build is
+authoritative for **COMPILE-VALIDATED** status.
+
+**DEVICE-UNVERIFIED.** No physical terminal has displayed an image: local
+and SSH rendering, tmux passthrough, Chafa presence/absence, SHM
+success/denial, malformed images, and rootful/rootless × root/mobile
+behavior all await the device. See [the Task 015 terminal-graphics device
+test plan](ios-device-test-plan-terminal-graphics.md).
+
+**COMPILE-VALIDATED / DEVICE-UNVERIFIED.**
