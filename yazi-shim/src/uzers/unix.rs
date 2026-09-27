@@ -30,4 +30,12 @@ impl Uzers {
 			.get_group_by_gid(gid.unwrap_or_else(Self::gid))
 			.map(|g| g.name().to_owned())
 	}
+
+	pub fn home_dir() -> Option<std::path::PathBuf> {
+		use ::uzers::{Users, os::unix::UserExt};
+		USERS_CACHE
+			.get_user_by_uid(Self::uid())
+			.map(|u| u.home_dir().to_owned())
+			.filter(|p| p.is_absolute())
+	}
 }
