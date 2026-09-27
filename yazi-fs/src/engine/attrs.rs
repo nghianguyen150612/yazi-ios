@@ -31,8 +31,11 @@ impl TryFrom<Attrs> for std::fs::FileTimes {
 			t = t.set_accessed(atime);
 		}
 
-		#[cfg(target_os = "macos")]
+		#[cfg(any(target_os = "macos", target_os = "ios"))]
 		if let Some(btime) = value.btime {
+			#[cfg(target_os = "ios")]
+			use std::os::ios::fs::FileTimesExt;
+			#[cfg(target_os = "macos")]
 			use std::os::macos::fs::FileTimesExt;
 			t = t.set_created(btime);
 		}
@@ -70,7 +73,8 @@ impl Attrs {
 	fn has_times(self) -> bool {
 		self.atime.is_some()
 			|| self.mtime.is_some()
-			|| (self.btime.is_some() && cfg!(any(target_os = "macos", target_os = "windows")))
+			|| (self.btime.is_some()
+				&& cfg!(any(target_os = "macos", target_os = "ios", target_os = "windows")))
 	}
 
 	pub fn atime_dur(self) -> Option<Duration> { self.atime?.duration_since(UNIX_EPOCH).ok() }
@@ -90,5 +94,36 @@ impl IntoLua for Attrs {
 				("mtime", self.mtime_dur().map(|d| d.as_secs_f64()).into_lua(lua)?),
 			])?
 			.into_lua(lua)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{fs::FileTimes, time::UNIX_EPOCH};
+
+	use super::Attrs;
+
+	#[test]
+	fn timestamp_capability() {
+		let supports_created = cfg!(any(target_os = "macos", target_os = "ios", target_os = "windows"));
+		for (atime, mtime, btime, expected) in [
+			(false, false, false, false),
+			(true, false, false, true),
+			(false, true, false, true),
+			(false, false, true, supports_created),
+			(true, true, false, true),
+			(true, false, true, true),
+			(false, true, true, true),
+			(true, true, true, true),
+		] {
+			let attrs = Attrs {
+				atime: atime.then_some(UNIX_EPOCH),
+				mtime: mtime.then_some(UNIX_EPOCH),
+				btime: btime.then_some(UNIX_EPOCH),
+				..Default::default()
+			};
+			assert_eq!(attrs.has_times(), expected, "{attrs:?}");
+			assert_eq!(FileTimes::try_from(attrs).is_ok(), expected, "{attrs:?}");
+		}
 	}
 }

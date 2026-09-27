@@ -60,8 +60,8 @@ fn imp(from: PathBuf, to: PathBuf, attrs: Attrs) -> task::JoinHandle<io::Result<
 fn primary_imp(from: &Path, to: &Path, attrs: Attrs) -> io::Result<u64> {
 	let written = match fs::copy(from, to) {
 		Ok(n) => n,
-		#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
-		Err(e) if matches!(e.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported) => {
+		#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))]
+		Err(e) if should_fallback_copy_error(e.kind()) => {
 			return fallback_imp(from, to, attrs);
 		}
 		Err(e) => return Err(e),
@@ -73,7 +73,7 @@ fn primary_imp(from: &Path, to: &Path, attrs: Attrs) -> io::Result<u64> {
 	Ok(written)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))]
 fn fallback_imp(from: &Path, to: &Path, attrs: Attrs) -> io::Result<u64> {
 	use std::os::unix::fs::OpenOptionsExt;
 
@@ -95,4 +95,76 @@ fn fallback_imp(from: &Path, to: &Path, attrs: Attrs) -> io::Result<u64> {
 		writer.set_times(times).ok();
 	}
 	Ok(written)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))]
+fn should_fallback_copy_error(kind: io::ErrorKind) -> bool {
+	matches!(kind, io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported)
+}
+
+#[cfg(all(
+	test,
+	any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios")
+))]
+mod tests {
+	use std::io::ErrorKind;
+
+	use super::{fallback_imp, should_fallback_copy_error};
+
+	#[test]
+	fn fallback_error_policy() {
+		for kind in [ErrorKind::PermissionDenied, ErrorKind::Unsupported] {
+			assert!(should_fallback_copy_error(kind), "{kind:?}");
+		}
+		for kind in [
+			ErrorKind::NotFound,
+			ErrorKind::AlreadyExists,
+			ErrorKind::StorageFull,
+			ErrorKind::WriteZero,
+			ErrorKind::ReadOnlyFilesystem,
+			ErrorKind::CrossesDevices,
+			ErrorKind::UnexpectedEof,
+			ErrorKind::Other,
+		] {
+			assert!(!should_fallback_copy_error(kind), "{kind:?}");
+		}
+	}
+
+	#[test]
+	fn fallback_copies_contents_and_metadata() -> std::io::Result<()> {
+		use std::{fs, os::unix::fs::PermissionsExt, time::{Duration, UNIX_EPOCH}};
+
+		use crate::{cha::Cha, engine::Attrs};
+
+		let dir = std::env::temp_dir().join(format!("yazi-copy-{}", rand::random::<u64>()));
+		fs::create_dir(&dir)?;
+		let _cleanup = scopeguard::guard(&dir, |dir| {
+			fs::remove_dir_all(dir).ok();
+		});
+		let from = dir.join("source");
+		let to = dir.join("destination");
+		fs::write(&from, b"copy metadata")?;
+		fs::set_permissions(&from, fs::Permissions::from_mode(0o640))?;
+		let attrs = Attrs {
+			atime: Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+			mtime: Some(UNIX_EPOCH + Duration::from_secs(1_700_000_100)),
+			..Cha::new("source", fs::metadata(&from)?).into()
+		};
+		fs::write(&to, b"old longer destination contents")?;
+		assert_eq!(fallback_imp(&from, &to, attrs)?, 13);
+		let meta = fs::metadata(&to)?;
+		assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+		assert_eq!(meta.accessed()?, attrs.atime.unwrap());
+		assert_eq!(meta.modified()?, attrs.mtime.unwrap());
+		assert_eq!(fs::read(&to)?, b"copy metadata");
+		assert_eq!(
+			fallback_imp(&dir.join("missing"), &to, attrs).unwrap_err().kind(),
+			ErrorKind::NotFound
+		);
+		assert_eq!(
+			fallback_imp(&from, &dir.join("missing/child"), attrs).unwrap_err().kind(),
+			ErrorKind::NotFound
+		);
+		Ok(())
+	}
 }

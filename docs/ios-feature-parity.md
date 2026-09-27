@@ -402,7 +402,7 @@ made that a jailbroken device launches an app; see
 | XDG, config, state, runtime, and temp directories | Unix builds use XDG variables and home-directory fallbacks; other platforms have separate paths | iOS current-UID suffix has a native lookup path; the overall iOS path policy remains unvalidated | Define rootful/rootless iOS locations and a safe runtime/temp policy without replacing the real UID | Rust std; jailbreak environment | Yes | TBD |
 | Mount and device discovery | Linux monitors `/proc`; macOS uses disk arbitration; generic partition metadata is used for refresh/sound decisions | Expected platform adapter; iOS monitor is not implemented | Add a provider or explicit unavailable implementation while keeping the partition contract | iOS/device APIs or an agreed empty provider | Yes | TBD |
 | Trash browsing and restore | Platform trash implementations support list, metadata, remove, restore, rename, and empty operations | iOS backend implemented in yazi-fs; target compilation validated; host functional tests passed; real-device runtime validation pending | Implement the iOS trash contract using ~/.local/share/Trash and Freedesktop .trashinfo format with collision resolution and copy fallback | Platform trash policy; no mandatory helper | Yes | 003 |
-| Local file watcher | `notify::RecommendedWatcher` is primary, with `PollWatcher` fallback and mount refresh callbacks | Expected platform adapter | Validate FSEvents/dispatch availability; retain polling and report capability | `notify`; optional platform notifications | Yes | TBD |
+| Local file watcher | `notify::RecommendedWatcher` is primary, with `PollWatcher` fallback and mount refresh callbacks | Expected platform adapter | Validate iOS KqueueWatcher events and polling fallback; runtime DEVICE-UNVERIFIED | `notify`; optional platform notifications | Yes | TBD |
 | Virtual watcher | Remote/VFS URLs are watched through a separate virtual backend | Portable (source-level); remote behavior unvalidated | Preserve virtual watch model and capability errors | VFS provider | Yes | TBD |
 | Blocking shell commands | Scheduler runs `sh -c` with inherited stdio and pauses/resumes the app | iOS compiles the same `fork`+`exec` Unix path; spawn failures now name the actual cause; jailbreak runtime still unverified | Keep the Unix path and make spawn failure diagnostics actionable per cause | `sh`, libc process APIs | Yes | 008 |
 | Background and orphan commands | Background commands stream stdout/stderr; orphan commands detach with `setsid` | iOS retains `setsid` via `pre_exec`; the alternative `posix_spawn` route cannot express a new session on Apple; jailbreak runtime unverified | Keep the detach contract and validate it on a device | `sh`, libc, jailbreak process policy | Yes | 008 |
@@ -478,3 +478,87 @@ For each later task:
 4. Do not mark a row supported solely because a Simulator or host build succeeds.
 5. Add newly discovered upstream features rather than silently dropping them from
    the inventory.
+
+## Task 011: local copy metadata
+
+Task 011 extends the existing local regular-file copy contract to iOS. `Cha.btime`
+comes from `Metadata::created().ok()`; unavailable creation times remain `None`.
+`Attrs` now regards birth time as writable on macOS, iOS, and Windows, using
+`std::os::ios::fs::FileTimesExt::set_created` on iOS. Linux, Android, and BSD
+still do not claim creation-time writes. Windows and macOS behavior is unchanged.
+
+The local copier now enables its existing Unix manual fallback on iOS, only for
+`PermissionDenied` and `Unsupported`. It opens the source, creates/truncates the
+destination with the requested mode, streams bytes with `io::copy`, then attempts
+permissions and timestamps. Source open, destination creation, and byte-copy
+failures propagate. Metadata restoration remains best effort, as before; this
+change does not promise ownership, ctime, xattr, or ACL parity for manual copies.
+No retry or raw errno policy was added.
+
+### Source evidence and copy lifecycle
+
+The workspace requires Rust 1.95.0; Task 010 CI installed Rust 1.98.1
+(`48a229ceaefd4985c50990b14116b6d856af0985`), also the local compiler. Sources
+were inspected at both revisions:
+
+- [Rust iOS exports](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/os/ios/mod.rs):
+  `FileTimesExt` is re-exported for iOS, stable since 1.75.0.
+- [Darwin FileTimesExt](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/os/darwin/fs.rs):
+  `set_created` records the supplied creation time in `FileTimes`.
+- [Rust Unix filesystem implementation](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/fs/unix.rs):
+  Apple `File::set_times` uses `fsetattrlist` and `ATTR_CMN_CRTIME` for a supplied
+  creation time. Apple `fs::copy`, including `aarch64-apple-ios`, first tries
+  `fclonefileat`. Clone `ENOTSUP`, `EEXIST`, and `EXDEV` proceed internally to
+  `fcopyfile`. Regular destinations use `COPYFILE_METADATA | COPYFILE_DATA`;
+  other destinations use `COPYFILE_DATA`. Other clone errors and copyfile errors
+  propagate to Yazi.
+- [Rust Unix errno mapping](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/io/error/unix.rs):
+  `EPERM`/`EACCES` map to `PermissionDenied`, `EOPNOTSUPP` to `Unsupported`,
+  `EXDEV` to `CrossesDevices`, and `ENOSPC` to `StorageFull`. Darwin `ENOTSUP`
+  (45) differs from `EOPNOTSUPP` (102), and falls through to `Uncategorized` if
+  it escapes std's internal clone handling. No additional fallback class is
+  justified by the existing policy.
+
+Scheduler `copy_do` and copy-based `move_do` pass source `Cha` to
+`yazi_vfs::engine::copy`, which converts it to `Attrs` before dispatching to
+`Local::copy_to`/`copy_from`. Local copies run `fs::copy` in `spawn_blocking`.
+The primary path preserves permissions through std's primitive and then attempts
+atime/mtime/btime restoration through the shim's `File::set_times`. The manual
+path attempts permissions and times after streaming. Directory traversal creates
+directories separately; non-followed symlinks go through `link_do` and `symlink`.
+Successful rename-based moves bypass copy. These paths are unchanged.
+
+### Validation boundaries
+
+Host validation passed: `cargo metadata --locked --no-deps`, `cargo check -p
+yazi-fs`, `cargo test -p yazi-fs` (27 tests), and checks for `yazi-scheduler` and
+`yazi-fm`. Focused tests cover all eight optional timestamp combinations, the
+fallback error policy, and real manual-copy contents/truncation/mode/atime/mtime
+plus source/destination open failures. Linux tests do not test creation-time
+writes. Targeted `rustfmt +nightly` was UNAVAILABLE due to the pre-existing
+toolchain mismatch (no rustup shim/nightly); nearby formatting was preserved. Local Apple cross-checks are environment-gated (Linux host lacks
+the iOS target/Apple SDK); the exact-commit **iOS Baseline** build is authoritative
+for **COMPILE-VALIDATED** status. CI does not run physical-device metadata tests.
+All physical jailbroken-storage copy behavior remains **DEVICE-UNVERIFIED**.
+See [the Task 011 device plan](ios-device-test-plan-copy-metadata.md).
+
+### Corrected watcher premise and Task 012 candidate
+
+Locked notify **8.2.0** selects `KqueueWatcher` for iOS in
+[src/lib.rs](https://github.com/notify-rs/notify/blob/a1d7c2d8f80786679d58ec6d5986a1d4278bc8cf/notify/src/lib.rs).
+macOS selects `FsEventWatcher` when `macos_kqueue` is disabled; enabling
+`macos_kqueue` selects `KqueueWatcher`. The enabled `macos_fsevent` feature does
+not change the iOS selection, and `fsevent-sys` is a macOS-only dependency in
+[notify's manifest](https://github.com/notify-rs/notify/blob/a1d7c2d8f80786679d58ec6d5986a1d4278bc8cf/notify/Cargo.toml).
+Yazi retains `PollWatcher` when primary initialization/watch registration fails.
+Watcher runtime semantics remain **DEVICE-UNVERIFIED**; no watcher code changed.
+
+Candidate Task 012: audit filesystem watcher runtime semantics in
+`yazi-watcher/src/local/local.rs`, `backend.rs`, `reporter.rs`, and
+`yazi-fs/src/mounts`. The primary watcher registers nonrecursive watches; polling
+uses a one-second interval and access events are filtered. Mount monitoring is
+only enabled for Linux/macOS. Verify iOS kqueue event coverage, registration
+failure fallback, rename/delete/recreate behavior, descriptor lifecycle, and
+rootful/rootless/SSH refresh behavior before selecting changes. This is next
+because compile success cannot establish reliable file-list refresh, and the
+previous FSEvents premise obscured the actual backend. Task 012 is not implemented.
