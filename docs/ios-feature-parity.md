@@ -402,7 +402,7 @@ made that a jailbroken device launches an app; see
 | XDG, config, state, runtime, and temp directories | Unix builds use XDG variables and home-directory fallbacks; other platforms have separate paths | iOS current-UID suffix has a native lookup path; the overall iOS path policy remains unvalidated | Define rootful/rootless iOS locations and a safe runtime/temp policy without replacing the real UID | Rust std; jailbreak environment | Yes | TBD |
 | Mount and device discovery | Linux monitors `/proc`; macOS uses disk arbitration; generic partition metadata is used for refresh/sound decisions | Expected platform adapter; iOS monitor is not implemented | Add a provider or explicit unavailable implementation while keeping the partition contract | iOS/device APIs or an agreed empty provider | Yes | TBD |
 | Trash browsing and restore | Platform trash implementations support list, metadata, remove, restore, rename, and empty operations | iOS backend implemented in yazi-fs; target compilation validated; host functional tests passed; real-device runtime validation pending | Implement the iOS trash contract using ~/.local/share/Trash and Freedesktop .trashinfo format with collision resolution and copy fallback | Platform trash policy; no mandatory helper | Yes | 003 |
-| Local file watcher | `notify::RecommendedWatcher` is primary, with `PollWatcher` fallback and mount refresh callbacks | Expected platform adapter | Validate iOS KqueueWatcher events and polling fallback; runtime DEVICE-UNVERIFIED | `notify`; optional platform notifications | Yes | TBD |
+| Local file watcher | notify 8.2.0 resolves `RecommendedWatcher` to `KqueueWatcher` on iOS; Yazi uses one-second `PollWatcher` for all iOS local paths | Source-verified policy; target build and runtime status below | Nonrecursive kqueue cannot observe edits to existing child files that Yazi does not register individually; PollWatcher also follows delete/recreate paths. Device behavior remains DEVICE-UNVERIFIED | notify kqueue; PollWatcher | Yes | TBD |
 | Virtual watcher | Remote/VFS URLs are watched through a separate virtual backend | Portable (source-level); remote behavior unvalidated | Preserve virtual watch model and capability errors | VFS provider | Yes | TBD |
 | Blocking shell commands | Scheduler runs `sh -c` with inherited stdio and pauses/resumes the app | iOS compiles the same `fork`+`exec` Unix path; spawn failures now name the actual cause; jailbreak runtime still unverified | Keep the Unix path and make spawn failure diagnostics actionable per cause | `sh`, libc process APIs | Yes | 008 |
 | Background and orphan commands | Background commands stream stdout/stderr; orphan commands detach with `setsid` | iOS retains `setsid` via `pre_exec`; the alternative `posix_spawn` route cannot express a new session on Apple; jailbreak runtime unverified | Keep the detach contract and validate it on a device | `sh`, libc, jailbreak process policy | Yes | 008 |
@@ -542,23 +542,88 @@ for **COMPILE-VALIDATED** status. CI does not run physical-device metadata tests
 All physical jailbroken-storage copy behavior remains **DEVICE-UNVERIFIED**.
 See [the Task 011 device plan](ios-device-test-plan-copy-metadata.md).
 
-### Corrected watcher premise and Task 012 candidate
+### Task 012: iOS filesystem watcher policy
 
-Locked notify **8.2.0** selects `KqueueWatcher` for iOS in
-[src/lib.rs](https://github.com/notify-rs/notify/blob/a1d7c2d8f80786679d58ec6d5986a1d4278bc8cf/notify/src/lib.rs).
-macOS selects `FsEventWatcher` when `macos_kqueue` is disabled; enabling
-`macos_kqueue` selects `KqueueWatcher`. The enabled `macos_fsevent` feature does
-not change the iOS selection, and `fsevent-sys` is a macOS-only dependency in
-[notify's manifest](https://github.com/notify-rs/notify/blob/a1d7c2d8f80786679d58ec6d5986a1d4278bc8cf/notify/Cargo.toml).
-Yazi retains `PollWatcher` when primary initialization/watch registration fails.
-Watcher runtime semantics remain **DEVICE-UNVERIFIED**; no watcher code changed.
+**SOURCE-VERIFIED.** The lockfile selects notify **8.2.0**, whose
+`RecommendedWatcher` alias selects `KqueueWatcher` under `target_os = "ios"` in
+[notify's platform aliases](https://github.com/notify-rs/notify/blob/8.2.0/notify/src/lib.rs).
+`macos_fsevent` is enabled by Yazi, but `fsevent-sys` is a macOS-target dependency
+in [notify's manifest](https://github.com/notify-rs/notify/blob/8.2.0/notify/Cargo.toml);
+the feature does not make iOS use FSEvents. macOS continues to select
+`FsEventWatcher` unless `macos_kqueue` is enabled.
 
-Candidate Task 012: audit filesystem watcher runtime semantics in
-`yazi-watcher/src/local/local.rs`, `backend.rs`, `reporter.rs`, and
-`yazi-fs/src/mounts`. The primary watcher registers nonrecursive watches; polling
-uses a one-second interval and access events are filtered. Mount monitoring is
-only enabled for Linux/macOS. Verify iOS kqueue event coverage, registration
-failure fallback, rename/delete/recreate behavior, descriptor lifecycle, and
-rootful/rootless/SSH refresh behavior before selecting changes. This is next
-because compile success cannot establish reliable file-list refresh, and the
-previous FSEvents premise obscured the actual backend. Task 012 is not implemented.
+Yazi watches the active directory, its parent, and sometimes the hovered
+directory; `Watcher::watch` also registers any explicit file URLs it receives.
+All local paths are registered with `RecursiveMode::NonRecursive`. The separate
+virtual backend handles remote/VFS URLs. The local handler filters access events,
+then `Reporter` maps event URLs to watched parents, linked aliases, and virtual
+cache entries. When a reported local path is itself watched, it is forwarded even
+if its parent is not in the watch set. If a reported path resolves to an existing
+directory, `Local::changed` forces a refresh of that directory's entries. Local
+reports distinguish the event path from its watched trail: ordinary child events
+update the directory metadata without starting a second contents refresh.
+
+Although notify's target alias is KqueueWatcher on iOS, Yazi routes every local
+iOS Watchee to PollWatcher. The reason is source-verified: Yazi registers only
+the active/parent/hovered paths, not every child file, and passes
+`RecursiveMode::NonRecursive`. Kqueue therefore cannot report content changes
+inside existing child files. For directory writes, notify may report only the
+directory or guess one child from its internal watch map; that map is not a
+snapshot of the directory at registration time. A direct vnode watch also stays
+attached to the old inode after rename/delete and does not follow a replacement
+at the same pathname. PollWatcher scans the watched path nonrecursively, so it
+observes both child changes and same-path replacement without maintaining a
+per-child descriptor set. This iOS routing is based on source behavior, not the
+absence of a physical test device; other platforms retain RecommendedWatcher as
+their primary backend.
+
+The notify 8.2.0 kqueue backend uses a descriptor-backed vnode watch for each
+registered path: `kqueue::Watcher::add_filename` opens the path and transfers its
+file descriptor to the kqueue watcher. Kqueue requests `NOTE_DELETE`,
+`NOTE_WRITE`, `NOTE_EXTEND`, `NOTE_ATTRIB`, `NOTE_LINK`, `NOTE_RENAME`, and
+`NOTE_REVOKE`. A file write reports `Modify(Data)`; metadata reports
+`Modify(Metadata)`; delete and revoke report `Remove`; rename reports
+`Modify(Name)` for the old path. For nonrecursive directory watches, a directory
+write scans for the first child missing from notify's internal watch map and
+reports it as `Create`; when it finds none, the reported path is the directory.
+This is not a full directory diff. Yazi therefore refreshes that directory when
+the event reaches it. Kqueue's `NOTE_LINK` directory path causes notify to
+remove and recursively add watches around the subdirectory change.
+
+Notify's kqueue watcher owns one descriptor per registered vnode (plus its
+event-loop resources) until unwatch or drop. Its source removes path bookkeeping
+before walking a path for delete/rename cleanup. If the path has already
+disappeared, that walk can fail before the underlying descriptor is removed;
+re-adding the same pathname replaces and closes the old descriptor, otherwise
+it can remain until the watcher is dropped. Yazi avoids accumulating these
+per-path vnode descriptors on iOS by routing local paths to PollWatcher. No
+process-wide file descriptor limit is raised. On targets that use a primary
+watcher, registration errors (including `EMFILE`/`ENFILE`) still attempt
+PollWatcher for that path, and failed primary registrations are cleaned up
+before fallback.
+
+The one-second PollWatcher remains available even if primary initialization
+fails. PollWatcher initialization failure is logged and does not panic startup;
+if no watcher can register a path, the error is returned to the existing watch
+sync logger. Callback errors now produce nonfatal diagnostics. Missing-path
+registration races are debug-logged and retried when Yazi next synchronizes its
+watch set. iOS mount discovery remains absent, so filesystem classes such as
+network or FUSE mounts cannot be classified as soundless on this target.
+
+**COMPILE-VALIDATED.** GitHub Actions `iOS Baseline` run **36293127074** passed
+the `aarch64-apple-ios` build for source commit `a6d1237c324ed84925aec3e44d8a2cdca0a36668`,
+including `yazi-fm`. Local target checks are unavailable because this host lacks
+the target standard library. The final documentation amendment is rebuilt by its
+own exact-commit CI run; the final PR head and run are recorded in the Task 012
+handoff. The target dependency tree contains notify's kqueue dependencies and
+PollWatcher dependencies, with no FSEvents-only link requirement.
+
+**DEVICE-UNVERIFIED.** No jailbroken device has validated kqueue registration,
+events, descriptor limits, PollWatcher fallback timing, symlink aliases, or
+rootful/rootless/SSH behavior. See the [Task 012 watcher device test plan](ios-device-test-plan-watcher.md).
+
+Candidate Task 013: audit iOS mount/device discovery. Source inspection shows
+`yazi-fs/src/mounts` only monitors Linux and macOS, while generic iOS
+`Partitions::soundless` returns false. That leaves network/FUSE filesystem
+classification unavailable and is the next demonstrated platform gap. Do not
+implement it as part of Task 012.

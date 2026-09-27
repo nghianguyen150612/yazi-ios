@@ -40,7 +40,7 @@ impl<'a> Watchee<'a> {
 	{
 		let url = url.into();
 		if let Some(path) = url.as_local() {
-			let b = Local::soundless(path).await;
+			let b = Local::use_alternative(path).await;
 			Self::Local(url, b)
 		} else {
 			Self::Virtual(url)

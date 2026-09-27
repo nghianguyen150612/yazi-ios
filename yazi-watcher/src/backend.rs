@@ -1,7 +1,7 @@
 use notify::Result;
 use tokio::sync::mpsc;
 
-use crate::{Reporter, WATCHED, Watchee, local::{self, LINKED, Linked}, r#virtual};
+use crate::{Refresher, Reporter, WATCHED, Watchee, local::{self, LINKED, Linked}, r#virtual};
 
 pub(crate) struct Backend {
 	local:               local::Local,
@@ -10,7 +10,7 @@ pub(crate) struct Backend {
 }
 
 impl Backend {
-	pub(crate) fn serve() -> Self {
+	pub(crate) fn serve(refresher: Refresher) -> Self {
 		#[cfg(any(target_os = "linux", target_os = "macos"))]
 		yazi_fs::mounts::Partitions::monitor(&yazi_fs::mounts::PARTITIONS, || {
 			crate::MgrProxy::watch();
@@ -23,7 +23,7 @@ impl Backend {
 		let reporter = Reporter { local_tx, virtual_tx };
 
 		Self {
-			local: local::Local::serve(local_rx, reporter.clone()),
+			local: local::Local::serve(local_rx, reporter.clone(), refresher),
 			r#virtual: r#virtual::Virtual::serve(virtual_rx),
 			reporter,
 		}

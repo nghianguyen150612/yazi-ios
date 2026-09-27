@@ -115,7 +115,7 @@ those executables or by the build/package tooling.
 | TTY and terminal I/O | `yazi-tty`, `yazi-term`, `yazi-tui` | Unix file descriptors, `/dev/tty`, termios, resize signals, terminal modes, and process stdio need device/SSH validation |
 | Terminal capability detection | `yazi-emulator` (`Brand`, `Emulator`, `Probe`, `Mux`) | Existing probes are the model for capability-based graphics, clipboard, keyboard, and mux support; do not assume an iOS terminal protocol |
 | Filesystem and paths | `yazi-fs` (`engine`, `path`, `file`, `cha`, `cwd`, `xdg`, `mounts`, `trash`) | Local POSIX-like APIs are likely reusable, but jailbreak path roots, sandbox restrictions, case folding, permissions, mounts, and trash are platform-sensitive |
-| File watcher | `yazi-watcher`, `notify` with `macos_fsevent` feature, `PollWatcher` fallback | iOS KqueueWatcher event coverage, sandbox access, jailbreak filesystem notifications, and polling behavior remain DEVICE-UNVERIFIED |
+| File watcher | `yazi-watcher`, notify 8.2.0 selects `KqueueWatcher` on iOS; Yazi routes iOS local paths through one-second `PollWatcher` | Source policy is verified; iOS target and device status are tracked in the parity document and watcher device plan |
 | Task scheduler and file operations | `yazi-scheduler` (`file`, `process`, `fetch`, `preload`, `hook`, `size`, `plugin`) | Preserves asynchronous progress, cancellation, hooks, and external process semantics; shell spawning is a major iOS concern |
 | Process and shell integration | `yazi-scheduler/src/process`, `yazi-shared/src/shell`, `yazi-binding/src/process` | Uses `sh`, `cmd.exe`, libc process setup, inherited stdio, and background/orphan modes; capability adapter required rather than disabling the scheduler |
 | Image decoding and terminal graphics | `yazi-adapter`, drivers `kgp`, `kgp_old`, `iip`, `sixel`, `ueberzug`, `chafa` | Protocols should be selected by probes; external tools and local compositor support are optional |
@@ -162,8 +162,15 @@ The most important observations for later tasks are:
    `notify`, creates a `RecommendedWatcher`, and retains a polling alternative. The
    locked notify 8.2.0 selects `KqueueWatcher` on iOS. macOS selects
    `FsEventWatcher` unless `macos_kqueue` is enabled; `fsevent-sys` is macOS-only.
-   The feature does not make iOS FSEvents-backed. Initialization, event coverage,
-   and polling fallback remain DEVICE-UNVERIFIED.
+   The feature does not make iOS FSEvents-backed. Task 012 routes iOS local paths
+   through the one-second PollWatcher because Yazi's nonrecursive directory
+   watches cannot observe edits to child files that are not themselves watched,
+   and vnode watches do not follow replacement paths. Other targets retain
+   RecommendedWatcher with per-path polling fallback. The reason is source
+   behavior, not missing device hardware; aarch64-apple-ios checks and CI
+   establish compile status only. All kqueue, filesystem, descriptor-limit, SSH, and
+   rootful/rootless runtime behavior remains DEVICE-UNVERIFIED; see
+   `docs/ios-device-test-plan-watcher.md`.
 6. **Terminal and SSH.** `yazi-term` uses Unix termios, signal hooks, poll/select,
    Unix stream pairs, and `/dev/tty`; `yazi-tty` opens standard file descriptors or
    `/dev/tty`. These are the primary SSH and jailbroken-terminal seams. Task 007
