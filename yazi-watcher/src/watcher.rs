@@ -17,7 +17,7 @@ impl Watcher {
 		let last = LastValue::default();
 		let refresher = Refresher::serve();
 
-		let backend = Backend::serve();
+		let backend = Backend::serve(refresher.clone());
 		let reporter = backend.reporter.clone();
 
 		tokio::spawn(Self::run(last.clone(), backend));
@@ -91,7 +91,9 @@ impl Watcher {
 			for mut watchee in to_watch {
 				match backend.watch(&mut watchee) {
 					Ok(()) => WATCHED.write().insert(watchee),
-					Err(e) if matches!(e.kind, notify::ErrorKind::PathNotFound) => {}
+					Err(e) if matches!(e.kind, notify::ErrorKind::PathNotFound) => {
+						yazi_macro::debug!("Watch skipped for a path that disappeared: {e:?}");
+					}
 					Err(e) => error!("Watch failed: {e:?}"),
 				}
 			}
