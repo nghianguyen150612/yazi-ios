@@ -615,3 +615,63 @@ restoration and propagation of source/destination/stream failures. Other platfor
 and metadata contracts are unchanged. See the source evidence and validation
 boundaries in [Task 011 parity notes](ios-feature-parity.md#task-011-local-copy-metadata).
 Physical storage semantics remain DEVICE-UNVERIFIED.
+
+## Task 015 terminal graphics policy
+
+Task 015 turns the anticipated terminal-capability adapter into a concrete
+selection, transport, and fallback policy. It is recorded here as the rule
+for this seam because previewers, `ya env`, and later Lua/runtime tasks all
+depend on which renderer answers and why.
+
+**Active probes vs environment heuristics.** Only these are actively
+queried: Kitty graphics and Kitty SHM (APC `i=` query actions, answered
+`OK`), Sixel (DA1 attribute 4), cell pixel size (`CSI 16 t`), XT version
+(brand refinement), color scheme/background, cursor blink/style, CSI-u, and
+clipboard (`OSC 5522`). `Brand::from_env()` (`TERM`, `TERM_PROGRAM`,
+session vars) is a heuristic used to seed the brand before the probe
+answers. IIP has no standard success query and stays identity-driven for
+the known IIP brands — a documented limitation, not a probed capability.
+SSH (`SSH_CLIENT`/`SSH_TTY`/`SSH_CONNECTION`) never disables a protocol;
+it only forces KGP onto base64 (see below) and keeps clipboard reads on the
+in-process mirror per Task 009.
+
+**Candidate order (verified).** `Drivers::candidates_for()` over an
+injected probe state returns the evidenced native protocols: known
+Kitty-protocol brands → modern `Kgp` (unicode placeholders); unknown
+terminal with only a successful KGP query → legacy `KgpOld` placement (the
+two are not interchangeable); DA1 Sixel → `Sixel`, ordered first for
+unknown/Zellij KGP+Sixel; known IIP brands → `Iip` then `Sixel`; tmux keeps
+passthrough framing, drops `KgpOld` unless the mux sixel flag positively
+selects `Sixel`. Only when no native candidate exists does the platform
+tail apply: `Chafa` on iOS — a jailbroken terminal must not become an
+X11/Wayland client from weak compositor env evidence, possibly forwarded
+over SSH — and the unchanged X11/Wayland/Chafa compositor fallback on
+desktop. Terminal-native runtime errors surface rather than being retried
+(no acknowledgement exists for a silently ignored sequence; no retry after
+partial output); only helper-backed failures fall through, `shown` tracking
+is preserved across every failure so cleanup still targets the right area,
+and only a successful, still-offered driver is cached.
+`Driver::needs_ueberzug()` is exactly `X11 | Wayland`: Chafa spawns
+`chafa` directly and must never start `ueberzugpp`.
+
+**Shared memory.** KGP SHM (`t=s`) is a same-machine optimization: the
+terminal opens the client's SHM object itself, so over SSH (remote client
+in the Kitty specification's "transmission medium" terms) only the
+base64/direct transport is valid. `kgp_shm_allowed()` is
+`reported && !in_ssh`; every KGP encode retains its SHM→base64 fallback,
+`shm_open`/`mmap`/`ftruncate` compile on `aarch64-apple-ios` through the
+existing `cfg(unix)` module, and SHM runtime availability on a jailbroken
+device is explicitly not required and not claimed.
+
+**No-renderer fallback.** When the chain is exhausted (no protocol, no
+`chafa`), the image Lua previewer renders Yazi's own `image_info`
+metadata — Format, Dimensions, Color — plus the renderer-unavailable
+reason as a normal wrapped preview widget. Undecodable images keep their
+real decode diagnostic. No `chafa`/`file`/`magick`/`ffmpeg`/`jq`
+dependency is involved.
+
+Compile success is not runtime evidence. Which protocol answers on a local
+jailbreak terminal, what a PC-side terminal reports over SSH, tmux
+passthrough, Chafa presence/absence, and SHM success/denial must be
+confirmed on a physical device before any supported claim is made; see
+`docs/ios-device-test-plan-terminal-graphics.md`.

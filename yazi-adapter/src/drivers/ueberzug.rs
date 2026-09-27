@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::Stdio};
+use std::{path::PathBuf, process::Stdio, sync::atomic::{AtomicBool, Ordering}};
 
 use anyhow::{Result, bail};
 use image::ImageReader;
@@ -15,13 +15,20 @@ use crate::{ADAPTOR, drivers::Driver};
 type Cmd = Option<(PathBuf, Rect)>;
 
 static DEMON: RoCell<Option<UnboundedSender<Cmd>>> = RoCell::new();
+static STARTED: AtomicBool = AtomicBool::new(false);
 
 pub(super) struct Ueberzug;
 
 impl Ueberzug {
 	pub(super) fn start(driver: Driver) {
 		if !driver.needs_ueberzug() {
-			return DEMON.init(None);
+			return;
+		}
+		// The adapter retries candidates and previews repeatedly; the daemon
+		// binding is process-wide, so the first ueberzug-backed selection
+		// wins and later calls are no-ops.
+		if STARTED.swap(true, Ordering::AcqRel) {
+			return;
 		}
 
 		let mut child = Self::create_demon(driver).ok();

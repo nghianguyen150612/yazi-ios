@@ -106,3 +106,52 @@ impl UserData for ImageColor {
 		});
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use std::{path::PathBuf, sync::atomic::{AtomicU64, Ordering}};
+
+	use image::{DynamicImage, ImageFormat};
+
+	use super::ImageInfo;
+
+	static SEQ: AtomicU64 = AtomicU64::new(0);
+
+	// Unique scratch path without extra dependencies or process-env use.
+	fn scratch(suffix: &str) -> PathBuf {
+		let n = SEQ.fetch_add(1, Ordering::Relaxed);
+		std::env::temp_dir().join(format!("yazi-image-info-{}-{n}.{suffix}", std::process::id()))
+	}
+
+	#[tokio::test]
+	async fn info_reports_format_dimensions_and_color() {
+		let img = DynamicImage::new_rgb8(7, 5);
+		let mut buf = vec![];
+		let mut cursor = std::io::Cursor::new(&mut buf);
+		img.write_to(&mut cursor, ImageFormat::Png).unwrap();
+		drop(cursor);
+
+		let path = scratch("png");
+		tokio::fs::write(&path, &buf).await.unwrap();
+		let info = ImageInfo::new(path.clone()).await.unwrap();
+		tokio::fs::remove_file(&path).await.ok();
+
+		// The fields the Lua metadata preview renders.
+		assert!(matches!(info.format, ImageFormat::Png));
+		assert_eq!((info.width, info.height), (7, 5));
+		assert!(matches!(info.color, image::ColorType::Rgb8));
+	}
+
+	#[tokio::test]
+	async fn undecodable_image_keeps_a_real_error() {
+		let path = scratch("bin");
+		tokio::fs::write(&path, b"this is not an image").await.unwrap();
+		let err = match ImageInfo::new(path.clone()).await {
+			Ok(_) => panic!("malformed image must not decode"),
+			Err(e) => e,
+		};
+		tokio::fs::remove_file(&path).await.ok();
+
+		assert!(!err.to_string().is_empty());
+	}
+}
