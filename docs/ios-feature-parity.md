@@ -1089,3 +1089,34 @@ Global-RoCell tests use `Once`/`OnceLock` lifecycles (shared
 **Status: HOST-RUNTIME-VALIDATED + COMPILE-VALIDATED / DEVICE-UNVERIFIED.**
 No physical jailbroken-device execution is claimed; see
 `docs/ios-device-test-plan-lua-runtime.md` (all 50 rows UNVERIFIED).
+
+## Task 017 evidence: external command capabilities
+
+Task 017 establishes the external-command contract in
+[`docs/ios-external-dependencies.md`](ios-external-dependencies.md). The
+source audit distinguishes runtime feature helpers, terminal integrations,
+configured opener actions, Yazi/Ya self-invocation, build-only commands, and
+test-only fixtures. No third-party executable is a core Yazi startup
+requirement.
+
+`ya doctor` is a plain-text capability report and `ya doctor --json` is the
+stable machine-readable form. Both resolve commands through the current
+process `PATH`, report the effective `YAZI_FILE_ONE` override, model `fd` →
+`fdfind` and `7zz` → `7z` as aliases, include `git` for `ya pkg`, and keep
+optional absence non-fatal. Version output is advisory: resolution remains
+`available` when a harmless version/help probe exits nonzero or produces no
+useful text.
+
+The iOS contract is deliberately capability-based. Native iOS clipboard and
+application handoff are built-in platform paths; `wl-*`, `xclip`, `xsel`,
+`pb*`, `termux-*`, `ueberzugpp`, `xdg-open`, `open`, and `termux-open` are not
+iOS requirements. `chafa`, media/preview helpers, search helpers, `git`, and
+tmux/zellij remain optional and are reported by feature. Missing helpers do
+not block startup, and no rootful/rootless jailbreak path is embedded in
+runtime lookup.
+
+The demonstrated zoxide defect is fixed: a failed `zoxide` spawn now reports
+an actionable start error, while an installed zoxide with no query output
+retains the “No directory history found” message. The host tests and target
+checks prove source/compile behavior only; all physical rows remain
+**UNVERIFIED** in `docs/ios-device-test-plan-external-tools.md`.

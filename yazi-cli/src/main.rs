@@ -1,4 +1,4 @@
-yazi_macro::mod_pub!(cache dds env open package shared);
+yazi_macro::mod_pub!(cache capability dds doctor env open package shared);
 
 yazi_macro::mod_flat!(args);
 
@@ -125,6 +125,8 @@ async fn run() -> anyhow::Result<()> {
 			yazi_config::setup()?;
 			outln!("{}", env::Env::print().await?)?;
 		}
+
+		Command::Doctor(cmd) => outln!("{}", doctor::Doctor::print(cmd.json)?)?,
 	}
 
 	Ok(())
