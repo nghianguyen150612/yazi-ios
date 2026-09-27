@@ -127,7 +127,7 @@ those executables or by the build/package tooling.
 | FFI and shared memory | `yazi-ffi` (`shm`, macOS disk arbitration/IOKit modules) | `cfg(target_os = "macos")` modules do not automatically cover iOS; Unix shared memory, IOKit, and entitlements need separate decisions |
 | Clipboard | `yazi-widgets/src/clipboard/{clipboard,lookup,unix,ios,windows}.rs` and terminal clipboard sequences | iOS has a native device-pasteboard backend; the desktop/Android helper probes are excluded there |
 | Opener and external integrations | `yazi-config/src/open`, `opener`, preset rules, `yazi-cli/src/env/env.rs` | `xdg-open`, `open`, Windows, and Termux rules do not define an iOS opener; runtime integration must be explicit |
-| Mount/device discovery | `yazi-fs/src/mounts` | Linux and macOS monitor implementations exist; iOS needs a provider or a deliberate empty capability set |
+| Mount/device discovery | `yazi-fs/src/mounts` | Linux, macOS, and iOS monitor implementations exist; the iOS provider is `getfsstat` enumeration plus snapshot polling in `mounts/ios.rs` |
 | Package manager | `yazi-cli/src/package` | Git, filesystem, archive, hashing, and deploy steps are optional runtime capabilities and not a reason to block launch |
 | Shared paths, shell syntax, and metadata | `yazi-shared`, `yazi-shim` | Unix path/string conversion still needs iOS auditing; Task 002 isolates current user/group identity behind a native iOS lookup adapter |
 
@@ -155,9 +155,10 @@ The most important observations for later tasks are:
    `yazi-fs/src/engine/local/local.rs` has separate Android, macOS, and generic
    Unix paths, so the actual local trash operation and the trash browsing API need
    to be reconciled during the trash task rather than inferred from the alias.
-4. **Mount monitoring.** `yazi-fs/src/mounts` contains Linux and macOS monitor
-   implementations only. The generic partition structure exists, but iOS device and
-   volume discovery is not implemented.
+4. **Mount monitoring.** `yazi-fs/src/mounts` contains Linux, macOS, and iOS
+   monitor implementations. The iOS provider (Task 013) enumerates with public
+   `getfsstat` and polls snapshots at low frequency; it does not reuse desktop
+   Disk Arbitration/IOKit code, which remains macOS-only.
 5. **Watcher backend.** `yazi-watcher` enables the `macos_fsevent` feature of
    `notify`, creates a `RecommendedWatcher`, and retains a polling alternative. The
    locked notify 8.2.0 selects `KqueueWatcher` on iOS. macOS selects
@@ -315,10 +316,14 @@ capabilities should be represented as unavailable, not guessed from a product na
 
 ### Mount and device discovery
 
-Keep the `Partitions`/mount manager contract, but provide an iOS implementation or
-an explicit empty provider backed by the available device/volume APIs. Do not
-silently reuse Linux `/proc` or desktop macOS disk-arbitration code. Mount discovery
-should be optional: browsing a known path must work when no provider is available.
+Keep the `Partitions`/mount manager contract, and prefer public BSD mount-table
+APIs (`getfsstat`/`statfs`) on iOS over desktop Disk Arbitration, which is
+macOS-only. The Task 013 iOS provider is the reusable policy: `getfsstat`-based
+enumeration plus low-frequency snapshot polling, mount identity compared on
+(source, mount point, filesystem type) only, failures nonfatal with the last
+good snapshot preserved. Do not silently reuse Linux `/proc` code. Mount
+discovery stays optional: browsing a known path must work when no provider is
+available.
 
 ### Process and shell integration
 

@@ -11,7 +11,7 @@ pub(crate) struct Backend {
 
 impl Backend {
 	pub(crate) fn serve(refresher: Refresher) -> Self {
-		#[cfg(any(target_os = "linux", target_os = "macos"))]
+		#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 		yazi_fs::mounts::Partitions::monitor(&yazi_fs::mounts::PARTITIONS, || {
 			crate::MgrProxy::watch();
 			crate::MgrProxy::refresh();

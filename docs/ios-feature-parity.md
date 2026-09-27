@@ -400,7 +400,7 @@ made that a jailbroken device launches an app; see
 | Case-insensitive filename handling | Linux, Android, macOS, Windows, NetBSD, and OpenBSD have specialized case-folding paths | iOS implementation added sharing Darwin F_GETPATH / O_SYMLINK path; target compilation validated; real-device behavior pending | Add an iOS path/final-path implementation or a deliberately tested fallback | Apple filesystem APIs or libc | Yes | 004 |
 | Path expansion and URL normalization | XDG, home, tilde, absolute/relative, view URLs, and path cleaning are centralized in `yazi-fs`/`yazi-shared` | Expected platform adapter | Preserve `Url`/`Path` contracts; provide iOS platform roots and permission-aware expansion | Rust std; jailbreak path layout | Yes | TBD |
 | XDG, config, state, runtime, and temp directories | Unix builds use XDG variables and home-directory fallbacks; other platforms have separate paths | iOS current-UID suffix has a native lookup path; the overall iOS path policy remains unvalidated | Define rootful/rootless iOS locations and a safe runtime/temp policy without replacing the real UID | Rust std; jailbreak environment | Yes | TBD |
-| Mount and device discovery | Linux monitors `/proc`; macOS uses disk arbitration; generic partition metadata is used for refresh/sound decisions | Expected platform adapter; iOS monitor is not implemented | Add a provider or explicit unavailable implementation while keeping the partition contract | iOS/device APIs or an agreed empty provider | Yes | TBD |
+| Mount and device discovery | Linux monitors `/proc`; macOS uses disk arbitration; generic partition metadata is used for refresh/sound decisions | iOS provider implemented (Task 013): `getfsstat` enumeration plus 10-second snapshot polling; `soundless`/`timeless` lookup active via `st_dev`; target and device validation required | Keep the `getfsstat` provider; no private-framework dependency | Yes | 013 |
 | Trash browsing and restore | Platform trash implementations support list, metadata, remove, restore, rename, and empty operations | iOS backend implemented in yazi-fs; target compilation validated; host functional tests passed; real-device runtime validation pending | Implement the iOS trash contract using ~/.local/share/Trash and Freedesktop .trashinfo format with collision resolution and copy fallback | Platform trash policy; no mandatory helper | Yes | 003 |
 | Local file watcher | notify 8.2.0 resolves `RecommendedWatcher` to `KqueueWatcher` on iOS; Yazi uses one-second `PollWatcher` for all iOS local paths | Source-verified policy; target build and runtime status below | Nonrecursive kqueue cannot observe edits to existing child files that Yazi does not register individually; PollWatcher also follows delete/recreate paths. Device behavior remains DEVICE-UNVERIFIED | notify kqueue; PollWatcher | Yes | TBD |
 | Virtual watcher | Remote/VFS URLs are watched through a separate virtual backend | Portable (source-level); remote behavior unvalidated | Preserve virtual watch model and capability errors | VFS provider | Yes | TBD |
@@ -627,3 +627,73 @@ Candidate Task 013: audit iOS mount/device discovery. Source inspection shows
 `Partitions::soundless` returns false. That leaves network/FUSE filesystem
 classification unavailable and is the next demonstrated platform gap. Do not
 implement it as part of Task 012.
+
+### Task 013: iOS mount discovery
+
+**SOURCE-VERIFIED.** `yazi-fs/src/mounts` had Linux (`/proc/mounts`,
+`/proc/partitions`, `/sys/block`) and macOS (Disk Arbitration, IOKit,
+CoreFoundation run loop) providers only; iOS had no provider, so `PARTITIONS`
+stayed empty and `Partitions::soundless`/`timeless` returned false there. The
+consumers are `yazi-watcher/src/local/local.rs` (`soundless` selects the polling
+watcher), `yazi-vfs/src/entries.rs` (`timeless` keeps directory entries when a
+revalidation observes no change), `yazi-plugin/src/fs/fs.rs` (the `partitions`
+Lua API, which hides `systemic` entries and exposes `src`/`dist`/`label`/
+`fstype`/`capacity`/`external`/`removable`), and `yazi-watcher/src/backend.rs`
+(`Partitions::monitor` fires watch/refresh/after-mount callbacks on Linux/macOS
+only).
+
+The iOS provider in `yazi-fs/src/mounts/ios.rs` deliberately does **not** port
+Disk Arbitration: those frameworks are macOS-only (`yazi-ffi` gates them on
+`cfg(target_os = "macos")`), and mount enumeration has a public BSD candidate.
+`libc 0.2.189` declares `getfsstat`, `getmntinfo`, `statfs`, and `fstatfs` once
+in its shared Apple module for macOS, iOS, tvOS, watchOS, and visionOS, with the
+same `statfs` layout (`f_mntonname`, `f_mntfromname`, `f_fstypename`,
+`f_blocks`, `f_bsize`, `f_fsid`, flags) and `MNT_WAIT`/`MNT_NOWAIT` constants on
+iOS. Enumeration therefore uses `getfsstat` with `MNT_NOWAIT` (so a dead network
+filesystem cannot block it), plus a count-then-fetch retry for a table that
+grows mid-read.
+
+Field mapping: `dist` is `f_mntonname`, `src` is `f_mntfromname`, `fstype` is
+`f_fstypename`, `capacity` is saturating `f_blocks * f_bsize`, and conversions
+trim NUL padding while preserving non-UTF-8 bytes losslessly on Unix. `label`,
+`external`, and `removable` are not reported by the mount table and stay `None`
+rather than being fabricated; an empty filesystem type maps to `None`. `rdev`
+is the `st_dev` of the mount point itself, which is exactly the `st_dev` that
+`Cha` reports for every file on that filesystem — unlike the Linux/macOS
+approach of reading `st_rdev` off a `/dev` node, this needs no assumption that
+every iOS mount has a conventional `/dev/diskXsY` node and stays
+layout-agnostic across rootful, rootless, firmlink, preboot, bind, network, and
+FUSE-like mounts. The generic `timeless` (`exfat`) and `soundless`
+(`fuse.rclone`, `nfs4`) classifiers are unchanged; no iOS-specific filesystem
+names were invented, and no `systemic` filtering was added (iOS keeps the
+generic non-hiding fallback so Apple system volumes are never hidden without
+evidence).
+
+Monitoring is a 10-second `getfsstat` snapshot poll in a `tokio::spawn` task:
+snapshots are sorted by mount point then source, compared on
+(source, mount point, filesystem type) identity only, and the existing
+watch/refresh/after-mount callback fires only on a real change — a filling
+filesystem (capacity-only change) never triggers a refresh loop. The first
+refresh populates `PARTITIONS` from its default empty state, so no real mount
+event after startup is required. Failures are nonfatal: the last good snapshot
+is preserved, a diagnostic is logged, and the next poll retries. No file
+descriptors are held between polls. Task 012's iOS PollWatcher policy is
+untouched: `Local::use_alternative` still returns true for iOS before consulting
+`soundless`, so mount data is now available without silently switching the
+watcher backend. Linux and macOS providers are unchanged.
+
+Host validation passed: `cargo check -p yazi-fs`, `cargo test -p yazi-fs` (40
+tests, including 13 new mount conversion/snapshot/classification tests that run
+without root and without mounting filesystems), `cargo check -p yazi-watcher`,
+and `cargo check -p yazi-fm`. Focused tests cover source/destination/type
+conversion, capacity calculation and saturation, `st_dev` association, optional
+metadata, deterministic ordering, same/added/removed/moved/retyped snapshots,
+free-space-only stability, and non-UTF-8 handling. Local target checks are
+environment-gated (this host lacks the iOS target standard library); the
+exact-commit **iOS Baseline** build is authoritative for **COMPILE-VALIDATED**
+status.
+
+**DEVICE-UNVERIFIED.** No jailbroken device has validated the enumerated mounts,
+`src`/`dist`/`fstype` strings, `st_dev` association, capacity sanity, mount/unmount
+callbacks, failure preservation, or rootful/rootless/SSH behavior. See [the
+Task 013 mount device test plan](ios-device-test-plan-mounts.md).
